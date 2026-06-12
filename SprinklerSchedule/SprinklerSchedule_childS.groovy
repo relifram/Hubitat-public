@@ -46,7 +46,7 @@ This code is licensed as follows:
 	-----------------------------------------------------------------------------
  *
  *
- *
+ * relifram: v1.0.19 Corrected recvOutdoorRainHandler to use deviceId. Added feature to allow system to abort cycle if rainhold is set 
  * csteele: v1.0.15	Add Overlap Check
  * csteele: v1.0.14	Accept Soil Type from Parent
  * csteele: v1.0.13	Merge dayGroup tables ( displayTable() merged into displayDayGroups() )
