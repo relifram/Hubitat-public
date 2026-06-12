@@ -649,7 +649,7 @@ def recvOutdoorTempHandler(evt) {
 
 def recvOutdoorRainHandler(evt) {
 	if (rainEnableDevice == evt.deviceId.toString()) {
-		state.rainDeviceOutdoor[evt.id.toString()] = [
+		state.rainDeviceOutdoor[evt.deviceId.toString()] = [
             	value: evt?.value,
             	name : evt?.displayName
 		]
@@ -853,6 +853,16 @@ def scheduleDurationHandler(data) {
 
 	// add an interstitial delay to allow the valves to close and recover before opening next.
 	pauseExecution(20000)	// 20 seconds between off and the next on
+	
+	//  Abort watering if rainhold is detected 
+	if (state.rainHold && rainEnableDevice && rainEnableDevice != "0") {
+		logWarn {"Rain Hold triggered mid-cycle. Aborting remaining zones."}
+		state.inCycle = false
+		atomicState.cycleEnd = now()
+		runIn(30, scheduleNext)
+		updateMyLabel(4)
+		return
+	}
 
 	if (valve2start != '[]') {
 		valve2start = valve2start.replaceAll(/\[|\]/, '').split(',').collect { it.trim().toInteger() }
