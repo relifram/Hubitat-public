@@ -46,6 +46,8 @@ This code is licensed as follows:
 	-----------------------------------------------------------------------------
  *
  *
+ * relifram: v1.0.21 bug fixes to interface and scheduling
+ * relifram: v1.0.20 Added sequential processing for rain tables
  * relifram: v1.0.19 Corrected recvOutdoorRainHandler to use deviceId. Added feature to allow system to abort cycle if rainhold is set 
  * csteele: v1.0.15	Add Overlap Check
  * csteele: v1.0.14	Accept Soil Type from Parent
@@ -193,16 +195,69 @@ Main Page handlers
 */
 
 String displayDayGroups() {	// display day-of-week groups - Section I
+	//.20
+	// Process pending duration and start time inputs before generating the UI
+	if (state.duraTimeBtn && settings.DuraTime != null) {
+		def duraTimeBtn = state.duraTimeBtn as Integer
+		def masterSize = state.dayGroupMaster?.size() ?: 0
+		def offset = (masterSize >= duraTimeBtn) 
+		def nIndex = (offset) ? duraTimeBtn.toString() : (duraTimeBtn - masterSize).toString()
+		if (offset) {
+			if (state.dayGroupMaster.containsKey(nIndex)) { state.dayGroupMaster[nIndex].duraTime = settings.DuraTime }
+		} else {
+			if (state.dayGroup.containsKey(nIndex)) { state.dayGroup[nIndex].duraTime = settings.DuraTime }
+		}
+		state.remove("duraTimeBtn")
+		app.removeSetting("DuraTime")
+	}
+
+	if (state.startTimeBtn) {
+	    def mode = settings.StartMode ?: "time"
+	    if ((mode == "time" && settings.StartTime) || (mode == "after" && settings.StartAfter)) {
+    		def startTimeBtn = state.startTimeBtn as Integer
+    		def masterSize = state.dayGroupMaster?.size() ?: 0
+    		def offset = (masterSize >= startTimeBtn) 
+    		def nIndex = (offset) ? startTimeBtn.toString() : (startTimeBtn - masterSize).toString()
+    		
+    		def newVal = mode == "time" ? Date.parse("yyyy-MM-dd'T'HH:mm:ss.SSSX", settings.StartTime).format('HH:mm') : settings.StartAfter
+            
+            // Collision Validation for Chained Execution
+            boolean hasConflict = false
+            if (mode == "after") {
+                def conflict = state.dayGroupMerge.find { k, v -> v.startTime == newVal && k.toString() != startTimeBtn.toString() }
+                if (conflict) {
+                    hasConflict = true
+                    state.chainError = "<b>Error:</b> Day Group ${conflict.key} is already configured to follow Group ${newVal.replace('after_', '')}. Multiple groups cannot follow a single group. Please select a different trigger."
+                }
+            }
+
+            if (!hasConflict) {
+                state.remove("chainError")
+        		if (offset) {
+        		    if (state.dayGroupMaster.containsKey(nIndex)) { state.dayGroupMaster[nIndex].startTime = newVal }
+        		} else {
+        		    if (state.dayGroup.containsKey(nIndex)) { state.dayGroup[nIndex].startTime = newVal }
+        		}
+        		state.remove("startTimeBtn")
+        		app.removeSetting("StartTime")
+        		app.removeSetting("StartMode")
+        		app.removeSetting("StartAfter")
+            }
+	    }
+	}
+//.20end
 	incM = state.dayGroupMaster?.size() ?: 0
 	if(state.dayGroupBtn) {		// toggle the daily checkmarks 
-		dgK = state.dayGroupBtn[0].toInteger() - incM // dayGroupBtn Key
-		dgI = state.dayGroupBtn.substring(1);   // dayGroupBtn value (mon-sun)
+		def btnStr = state.dayGroupBtn.toString()
+		def len = btnStr.length()
+		dgK = btnStr.substring(0, len - 1).toInteger() - incM // dayGroupBtn Key
+		dgI = btnStr.substring(len - 1)   // dayGroupBtn value (mon-sun)
 		state.dayGroup["$dgK"]["$dgI"] = !state.dayGroup["$dgK"]["$dgI"] // Toggle state
 		state.remove("dayGroupBtn") // only once 
 		logDebug {"displayDayGroups Item: $dgK.$dgI"}
 	}
 	if(state.overTempBtn) {			// toggle the overTemp checkmarks 
-		dgK = state.overTempBtn[0].toInteger() - incM // overTempBtn Key
+		dgK = state.overTempBtn.toInteger() - incM // overTempBtn Key
        	if (state.dayGroup.containsKey(dgK.toString())) { state.dayGroup[dgK.toString()].ot = !state.dayGroup[dgK.toString()].ot } // Toggle state
 		state.remove("overTempBtn") 	// only once 
 	}
@@ -262,11 +317,15 @@ String displayDayGroups() {	// display day-of-week groups - Section I
 			String dayBoxY = noButtonLink("w$rowCount$r", X,   "#49a37d", "")
 	        	str += (dg."$r") ? "<th>$dayBoxY</th>" : "<th>$dayBoxN</th>" 
 	        }
-	        // no delete button on Master dayGroup rows.
+	      // no delete button on Master dayGroup rows.
 		  str += "<th colspan=2>&nbsp;</th>"
-		  String sTime    = state.dayGroupMerge[k]?.startTime ? buttonLink("t$k", state.dayGroupMerge[k].startTime, "black") : buttonLink("t$k", "Set Time", "green")
-		  String dTime    = state.dayGroupMerge[k]?.duraTime 
-		  String duraTime = dTime ?  buttonLink("n$k", dTime, "purple") : buttonLink("n$k", "Select", "green")
+		  //.20
+		  String rawTime = state.dayGroupMerge[k]?.startTime
+		  String sTimeDisp = rawTime ? (rawTime.startsWith("after_") ? "After Grp ${rawTime.split('_')[1]}" : rawTime) : "Set Time"
+		  String sTime    = rawTime ? buttonLink("t$k", sTimeDisp, "black") : buttonLink("t$k", "Set Time", "green")
+		  String dTime    = state.dayGroupMerge[k]?.duraTime
+		  //.20end
+ 		  String duraTime = dTime ?  buttonLink("n$k", dTime, "purple") : buttonLink("n$k", "Select", "green")
 		  String reset    = buttonLink("x$k", "<iconify-icon icon='bx:reset'></iconify-icon>", "black", "20px")
 		  str += "<th>$sTime</th>" +
 		  	"<th>$duraTime</th>" + 
@@ -287,10 +346,14 @@ String displayDayGroups() {	// display day-of-week groups - Section I
 		  str += "<th>$remDayGroupBtn</th>"
 		  String otBoxN = buttonLink("o$rowCount", O, "#db7321", "")
 		  String otBoxY = buttonLink("o$rowCount", X,   "#db7321", "")
-	        str += (dg."ot") ? "<th>$otBoxY</th>" : "<th>$otBoxN</th>" 
-		  String sTime    = state.dayGroupMerge[rowCount]?.startTime ? buttonLink("t$rowCount", state.dayGroupMerge[rowCount].startTime, "black") : buttonLink("t$rowCount", "Set Time", "green")
+	      //.20
+		  str += (dg."ot") ? "<th>$otBoxY</th>" : "<th>$otBoxN</th>" 
+		  String rawTime = state.dayGroupMerge[rowCount]?.startTime
+		  String sTimeDisp = rawTime ? (rawTime.startsWith("after_") ? "After Grp ${rawTime.split('_')[1]}" : rawTime) : "Set Time"
+		  String sTime    = rawTime ? buttonLink("t$rowCount", sTimeDisp, "black") : buttonLink("t$rowCount", "Set Time", "green")
 		  String dTime    = state.dayGroupMerge[rowCount]?.duraTime 
 		  String duraTime = dTime ?  buttonLink("n$rowCount", dTime, "purple") : buttonLink("n$rowCount", "Select", "green")
+		  //.20end
 		  String reset    = buttonLink("x$rowCount", "<iconify-icon icon='bx:reset'></iconify-icon>", "black", "20px")
 		  str += "<th>$sTime</th>" +
 		  	"<th>$duraTime</th>" + 
@@ -334,46 +397,47 @@ String displayGrpSched() {	// display mapping of Valve to DayGroup - Section III
 Display level handlers
 -----------------------------------------------------------------------------
 */
-
+//.21 changed all displayStartTime() - added input checking to prevent chaining one: many.
 def displayStartTime() {
- 	if(state.startTimeBtn) {
+	if(state.startTimeBtn) {
 		def startTimeBtn = state.startTimeBtn as Integer
-		def masterSize = state.dayGroupMaster.size()
-		def offset = (masterSize >= startTimeBtn) 
-		def nIndex = (offset) ? startTimeBtn.toString() : (startTimeBtn - masterSize).toString()
-		input "StartTime", "time",   title: "At This Time", submitOnChange: true, width: 4, defaultValue: state.startTime, newLineAfter: false
-		input "DoneTime$state.startTimeBtn",  "button", title: "  Done with time  ", width: 2, newLineAfter: true
-		if(StartTime) {
-			if (offset) {
-			    if (state.dayGroupMaster.containsKey(nIndex)) { state.dayGroupMaster[nIndex].startTime = Date.parse("yyyy-MM-dd'T'HH:mm:ss.SSSX", StartTime).format('HH:mm') }
-			} else {
-			    if (state.dayGroup.containsKey(nIndex)) { state.dayGroup[nIndex].startTime = Date.parse("yyyy-MM-dd'T'HH:mm:ss.SSSX", StartTime).format('HH:mm') }
-			}
-			state.remove("startTimeBtn")
-			app.removeSetting("StartTime")
-			paragraph "<script>{changeSubmit(this)}</script>"
+		
+		// Safely fetch current value using the unified dayGroupMerge map, handling both int and string keys
+		def currentVal = state.dayGroupMerge[startTimeBtn]?.startTime ?: state.dayGroupMerge[startTimeBtn.toString()]?.startTime
+		def isAfter = currentVal?.toString()?.startsWith("after_")
+
+		// Determine the effective mode for UI rendering (Hubitat doesn't populate settings map from defaultValue on first pass)
+		def effectiveMode = settings.StartMode ?: (isAfter ? "after" : "time")
+
+		input "StartMode", "enum", title: "Start Trigger", submitOnChange: true, width: 3, options: ["time":"Scheduled Time", "after":"After Day Group"], defaultValue: isAfter ? "after" : "time"
+		
+		if (effectiveMode == "after") {
+			def groupOpts = [:]
+			state.dayGroupMerge.each { k, v -> if (k.toString() != startTimeBtn.toString()) groupOpts["after_${k}"] = "Day Group ${k}" }
+			input "StartAfter", "enum", title: "Select Group", submitOnChange: true, width: 3, options: groupOpts, defaultValue: isAfter ? currentVal : null, newLineAfter: false
+            
+            if (state.chainError) {
+                paragraph "<div style='color:red; padding-top: 4px'>${state.chainError}</div>"
+            }
+		} else {
+			input "StartTime", "time",   title: "At This Time", submitOnChange: true, width: 3, defaultValue: isAfter ? null : currentVal, newLineAfter: false
 		}
+
+		input "DoneTime$state.startTimeBtn",  "button", title: "  Done with time  ", width: 2, newLineAfter: true
 	}
 }
+//.21end
 
 
 def displayDuration() {
- 	if(state.duraTimeBtn) {
+	if(state.duraTimeBtn) {
 		def duraTimeBtn = state.duraTimeBtn as Integer
 		def masterSize = state.dayGroupMaster.size()
 		def offset = (masterSize >= duraTimeBtn) 
 		def nIndex = (offset) ? duraTimeBtn.toString() : (duraTimeBtn - masterSize).toString()
-		input "DuraTime", "decimal", title: "Sprinkler Duration", submitOnChange: true, width: 4, range: "0..60", defaultValue: state.duraTimeBtn, newLineAfter: true
-		if(DuraTime) {
-			if (offset) {
-			    if (state.dayGroupMaster.containsKey(nIndex)) { state.dayGroupMaster[nIndex].duraTime = DuraTime }
-			} else {
-			    if (state.dayGroup.containsKey(nIndex)) { state.dayGroup[nIndex].duraTime = DuraTime }
-			}
-			state.remove("duraTimeBtn")
-			app.removeSetting("DuraTime")
-			paragraph "<script>{changeSubmit(this)}</script>"
-		}
+		def currentVal = offset ? state.dayGroupMaster[nIndex]?.duraTime : state.dayGroup[nIndex]?.duraTime
+		
+		input "DuraTime", "decimal", title: "Sprinkler Duration", submitOnChange: true, width: 4, range: "0..60", defaultValue: currentVal, newLineAfter: true
 	}
 }
 
@@ -476,11 +540,16 @@ void appButtonHandler(btn) {
 	state.remove("dayGrpBtn")
 	state.remove("doneTime")
 	state.remove("duraTimeBtn") 
+	//.20 
 	state.remove("eraseTime")
 	state.remove("overTempBtn")
 	state.remove("startTimeBtn")
+	state.remove("chainError")
 	app.removeSetting("StartTime") 
-	app.removeSetting("DuraTime") 
+	app.removeSetting("StartMode") 
+	app.removeSetting("StartAfter") 
+	app.removeSetting("DuraTime")
+	//.20end
 
 	if      ( btn == "btnSchEna")           toggleEnaSchBtn()
 	else if ( btn == "addDGBtn")            addDayGroup()
@@ -728,7 +797,9 @@ def scheduleNext() {
 		return
 	}
 	
+// Clear all pending scheduled executions to prevent orphans when the table updates
 	unschedule(reschedule)
+	unschedule(schedHandler)
 	schedule('7 7 0 ? * *', reschedule) // reschedule the midnight run to schedule that day's work.
 
 	logInfo {"Checking $myLabel Schedule."}
@@ -753,18 +824,23 @@ def scheduleNext() {
 	Date date = new Date()
 	String akaNow = date.format("HH:mm")
 
+	//.21 - execute the next scheduled item, even if in the very near future.
 	hasSched = false
 	for (timN in timings) {
 	    sk = timN.key			// index into dayGroupMerge for Duration
+	    if (timN.startTime.startsWith("after_")) continue
+
 	    (sth, stm) = timN.startTime.split(':')
-	    if (akaNow.replace(':', '') > timN.startTime.replace(':', '')) continue
+	    if (akaNow.replace(':', '').toInteger() >= timN.startTime.replace(':', '').toInteger()) continue
 	    hasSched = true
 	    break;	// quit the for loop on a schedule of first startTime that's in the future.
 	}
-	logDebug {"schedule('0 $stm $sth ? * *', schedHandler, [data: ['dKey': $sk]]), hasSched: $hasSched"}
+	//.21end
+	//logDebug {"schedule('0 $stm $sth ? * *', schedHandler, [data: ['dKey': $sk]]), hasSched: $hasSched"}
 	if (hasSched) { 
 		schedule("0 ${stm} ${sth} ? * *", schedHandler, [data: ["dKey":"$sk"]]) 
 		logInfo {"$myLabel scheduled today."}
+		logDebug {"Scheduled events list for today: ${timings}"}
 	}
 	else {
 		logInfo {"Nothing scheduled for $myLabel today."}
@@ -833,20 +909,21 @@ def schedHandler(data) {
 	currentMonthPercentage = state.month2month ? state.month2month[currentMonth].toDouble() / 100 : 1  // Lookup the percent in month2month or 1 
 	dura = 60 * duraT * currentMonthPercentage		// duraTime is in minutes, runIn is in seconds
 	duraSeconds = Math.max(dura.toInteger(), 20) // Ensure minimum valve timing of 20 seconds
-	logDebug {"runIn($duraSeconds, scheduleDurationHandler, [vKey: $vk, dS: $duraSeconds, dV: $valve2start])"}
+	logDebug {"runIn($duraSeconds, scheduleDurationHandler, [vKey: $vk, dS: $duraSeconds, dV: $valve2start, dKey: $cd])"}
 
- 	runIn(duraSeconds, scheduleDurationHandler, [data: [vKey: "$vk", dS: "$duraSeconds", dV: "$valve2start"]]) 
+ 	runIn(duraSeconds, scheduleDurationHandler, [data: [vKey: "$vk", dS: "$duraSeconds", dV: "$valve2start", dKey: "$cd"]]) 
 }
 
 
 def scheduleDurationHandler(data) {
 	unschedule(scheduleDurationHandler)	// don't repeat this day after day.
-	cd = data.vKey as String
+	String vk = data.vKey as String
+	String cd = data.dKey as String
 	duraSeconds = data.dS.toInteger()
 	valve2start = data.dV as String
-	logDebug {"schedDurHandler: valveStop: $data.vKey, in Duration: $duraSeconds, next: $valve2start"}
+	logDebug {"schedDurHandler: valveStop: $vk, in Duration: $duraSeconds, next: $valve2start"}
 
-   	currentValve = settings.valves?.find{it.id == "$cd"}
+   	currentValve = settings.valves?.find{it.id == "$vk"}
 	// stop the valve and start the next, if any.
 	currentValve?.off()
 	logInfo {"Valve switch ${currentValve?.label ?: currentValve?.name} off."}
@@ -866,32 +943,49 @@ def scheduleDurationHandler(data) {
 
 	if (valve2start != '[]') {
 		valve2start = valve2start.replaceAll(/\[|\]/, '').split(',').collect { it.trim().toInteger() }
-		vk = valve2start[0] as String
-		if (vk != null) {
+		String nextVk = valve2start[0] as String
+		if (nextVk != null) {
 			valve2start = valve2start.tail()
-			currentValve = settings.valves?.find{it.id == "$vk"}
+			currentValve = settings.valves?.find{it.id == "$nextVk"}
 			currentValve?.on()
 			logInfo {"Valve switch ${currentValve?.label ?: currentValve?.name} on."}
 
-			runIn(duraSeconds, scheduleDurationHandler, [data: [vKey: "$vk", dS: "$duraSeconds", dV: "$valve2start"]])
+			runIn(duraSeconds, scheduleDurationHandler, [data: [vKey: "$nextVk", dS: "$duraSeconds", dV: "$valve2start", dKey: "$cd"]])
 		}
+	//.20
 	} else {
-		state.inCycle = false
-		atomicState.cycleEnd = now()
-		runIn(30, scheduleNext)			// find and then schedule the next startTime for today
-		updateMyLabel(4)
+        // Look for cascading groups
+        Calendar calendar = Calendar.getInstance();
+        def cronDay = calendar.get(Calendar.DAY_OF_WEEK);
+        Map aWeek = [1:'7', 2:'1', 3:'2', 4:'3', 5:'4', 6:'5', 7:'6']
+        def todayIndex = aWeek[cronDay]
+
+        def cascadedGroup = state.dayGroupMerge.find { k, v ->
+            v[todayIndex] == true && v.startTime == "after_${cd}"
+        }
+
+        if (cascadedGroup) {
+            logInfo {"Day Group $cd complete. Cascading to dependent Day Group ${cascadedGroup.key}."}
+            runIn(20, schedHandler, [data: ["dKey": cascadedGroup.key]])
+        } else {
+            state.inCycle = false
+            atomicState.cycleEnd = now()
+            runIn(30, scheduleNext)         // find and then schedule the next startTime for today
+            updateMyLabel(4)
+        }
 	}
+	//.20end
 }
 
-
+//.20
 def buildTimings(cronDayOf) {
 	Map aWeek = [1:'7', 2:'1', 3:'2', 4:'3', 5:'4', 6:'5', 7:'6']
 	// cronDayOf week is 1-7 where 1 = sunday and 7 = saturday. BUT this app uses 1 as Monday, sunday is 7
 	def result = state.dayGroupMerge.findAll { key, value -> value[aWeek[cronDayOf]] == true }.keySet()
-	def results = result.collect { key -> [key: key, duraTime: state.dayGroupMerge[key]?.duraTime, startTime: state.dayGroupMerge[key]?.startTime]}.findAll { it.startTime != null }.sort { it.startTime } // Sort by startTime
+	def results = result.collect { key -> [key: key, duraTime: state.dayGroupMerge[key]?.duraTime, startTime: state.dayGroupMerge[key]?.startTime]}.findAll { it.startTime != null }.sort { it.startTime.startsWith("after_") ? "99:99" : it.startTime } // Sort by startTime
 	// [[key:2, duraTime:5.0, startTime:06:00]]
 }
-
+//.20end
 
 void updateMyLabel(num) {
 	String baseLabel = app.label?.with { 
@@ -965,14 +1059,15 @@ def displayHeader() {
 	}
 }
 
-
+//.20
 private Integer timeToSeconds(String timeStr) {
-	if (!timeStr) return null
+	if (!timeStr || timeStr.startsWith("after_")) return null
 	def parts = timeStr.split(':')
 	int h = parts[0].toInteger()
 	int m = parts[1].toInteger()
 	return (h * 3600) + (m * 60)
 }
+//.20
 
 
 String menuHeader(titleText){"<div style=\"width:102%;background-color:#696969;color:white;padding:4px;font-weight: bold;box-shadow: 1px 2px 2px #bababa;margin-left: -10px\">${titleText}</div>"}
