@@ -4,8 +4,7 @@ SprinklerSchedulePlus (Monolithic)
 
     Inspiration: Lighting Schedules https://github.com/matt-hammond-001/hubitat-code
     Inspiration: github example from Hubitat of lightsUsage.groovy
-    Derived from: Sprinkler Schedules https://github.com/csteele-PD/Hubitat-public/tree/master/SprinklerSchedule
-	Code location: https://github.com/relifram/Hubitat-public/tree/master/SprinklerSchedule
+    This fork: Sprinkler Schedules https://github.com/relifram/Hubitat-public/tree/master/SprinklerSchedule
 
 -----------------------------------------------------------------------------
 This code is licensed as follows:
@@ -19,45 +18,20 @@ This code is licensed as follows:
 	Copyright (c) 2023, C Steele
 	Copyright (c) 2020, Matt Hammond
 	All rights reserved.
-	
-	Redistribution and use in source and binary forms, with or without
-	modification, are permitted provided that the following conditions are met:
-	
-	1. Redistributions of source code must retain the above copyright notice, this
-	   list of conditions and the following disclaimer.
-	
-	2. Redistributions in binary form must reproduce the above copyright notice,
-	   this list of conditions and the following disclaimer in the documentation
-	   and/or other materials provided with the distribution.
-	
-	3. Neither the name of the copyright holder nor the names of its
-	   contributors may be used to endorse or promote products derived from
-	   this software without specific prior written permission.
-	
-	THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-	AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-	IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-	DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-	FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-	DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-	SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-	CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-	OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-	OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -----------------------------------------------------------------------------
- * Version 2.0.0: Monolithic architecture consolidation. Unified parent/child topologies.
- * Includes explicit UX chain validation, isolated array payload scoping, and sequential 
- * synchronous execution mapping for real-time operation.
+ * Version 2.0.3: bug fixes
+ * Version 2.0.2: Pagination for the main page, removed support for valves
+ * Version 2.0.1: Monolithic architecture consolidation. Semantic variable standardization.
  */
 
-public static String version() { return "v2.0.0" }
+public static String version() { return "v2.0.2" }
 
 definition(
     name: "SprinklerSchedulePlus",
     namespace: "relifram",
-    author: "relifram",
-    description: "Monolithic controller for switching valves/relays to a timing schedule",
-    importUrl: "",
+    author: "J Haubold",
+    description: "Monolithic controller for switch relays to a timing schedule",
+    importUrl: "https://raw.githubusercontent.com/relifram/Hubitat-public/master/SprinklerSchedule/SprinklerSchedulePlus.groovy",
     documentationLink: "",
     singleInstance: true,
     iconUrl: "",
@@ -100,26 +74,44 @@ def mainPage() {
         }
 
         if (schEnable && valves) {
-            section(menuHeader("Configuration Routing")) {
+            section(menuHeader("Configuration")) {
                 href "schedulePage", title: "Timetable Matrix", description: "Configure Day Groups, durations, and map switches.", state: "complete"
-                href "environmentPage", title: "Global Overrides & Logging", description: "Configure seasonal adjustments, rain holds, temperature limits, and logs.", state: "complete"
+                href "environmentPage", title: "Global Settings & Overrides", description: "Configure seasonal adjustments, rain holds, and temperature limits.", state: "complete"
             }
 
             section(menuHeader("System Status")) {
-                currentMonth = new Date().format("M") 	
-                currentMonthPercentage = state.month2month ? state.month2month[currentMonth].toDouble() : 1  
+                def currentMonth = new Date().format("M") 	
+                def seasonalMultiplier = state.month2month ? state.month2month[currentMonth].toDouble() : 1  
                  
-                String str = "<div style='background-color: rgba(73, 163, 125, 0.3);'>"	
+  String statusHtml = "<div style='background-color: rgba(73, 163, 125, 0.3);'>"	
                 if (state.month2month) {
-                    str += "<b>Adjust valve timing</b> by Month is active. Current month is: <b>$currentMonthPercentage%</b><br>" +
+                    statusHtml += "<b>Adjust valve timing</b> by Month is active. Current month is: <b>$seasonalMultiplier%</b><br>" +
                     "<b>Rain hold</b> is $state.rainHold<br>" +
                     "<b>Soil</b> is $state.defaultSoilType<br>"
                 }
-                if (state.overTempToday) { str += "Sometime today, the outside temperature <b>exceeded</b> the limit you set of $state.maxOutdoorTemp and any Over Temp schedules <b>will run.</b><br>" }
-                str += valves?.collect { dev -> "<b>${dev.label ?: dev.name}</b> is ${dev.currentValue('switch') == 'on' ? 'On' : 'Off'}"}?.join(', ') ?: ""
-                str += "</div>"
-                paragraph str
-            }
+                
+                if (settings.outdoorTempDevice) {
+                    def currentTemp = settings.outdoorTempDevice.currentValue("temperature") ?: "N/A"
+                    def todayHigh = state.todayHighTemp ?: currentTemp
+                    def triggerLimit = settings.maxOutdoorTemp ?: "N/A"
+                    statusHtml += "<b>Temperature:</b> Current: ${currentTemp}° | Today's High: ${todayHigh}° | Trigger Limit: ${triggerLimit}°<br>"
+                }
+                
+                if (state.overTempToday) { statusHtml += "Sometime today, the outside temperature <b>exceeded</b> the limit you set of $settings.maxOutdoorTemp and any Over Temp schedules <b>will run.</b><br>" }
+                statusHtml += valves?.collect { device -> "<b>${device.label ?: device.name}</b> is ${device.currentValue('switch') == 'on' ? 'On' : 'Off'}"}?.join(', ') ?: ""
+                statusHtml += "</div>"
+                paragraph statusHtml
+           
+				section(menuHeader("System Logging")) {
+				input "infoEnable", "bool", title: "Enable activity logging", required: false, defaultValue: true, width: 2
+				input "debugEnable", "bool", title: "Enable debug logging", required: false, defaultValue: false, submitOnChange: true, width: 3
+
+					if (debugEnable) {
+						input "debugTimeout", "enum", required: false, defaultValue: "0", title: "Automatic debug Log Disable Timeout?", width: 3,  \
+								options: [ "0":"None", "1800":"30 Minutes", "3600":"60 Minutes", "86400":"1 Day" ]
+					}
+				}
+			}
         }
     }
 }
@@ -150,34 +142,10 @@ def environmentPage() {
             editMonths()
             selectTemperatureDevice()
             selectRainDevice()
-			
-			paragraph "\n<b>Soil Type Data (Information Only)</b>"
+            
+            paragraph "\n<b>Soil Type Data (Information Only)</b>"
             paragraph "Current Saved Soil: <b>${state.defaultSoilType ?: 'Unknown'}</b>"
             input "btnUsda", "button", title: "Fetch USDA Soil Data", width: 3, submitOnChange: true
-        }
-
-        if (state.rainDeviceData != [:]) {
-            section(menuHeader("Rain Sensor Mapping")) {
-                def rainVars = ["0": "no rainHold"]
-                state.rainDeviceData.each { key, info ->
-                    rainVars[key] = info.name
-                }
-                input "rainEnableDevice", "enum", 
-                    title: "<b>Choose the Rain Sensor for this Timetable</b><p><i>leave unselected for no Rain Hold</i></p>", 
-                    submitOnChange: true, 
-                    defaultValue: "0",
-                    options: rainVars
-            }
-        }
-
-        section(menuHeader("System Logging")) {
-            input "infoEnable", "bool", title: "Enable activity logging", required: false, defaultValue: true, width: 2
-            input "debugEnable", "bool", title: "Enable debug logging", required: false, defaultValue: false, submitOnChange: true, width: 2
-
-            if (debugEnable) {
-                input "debugTimeout", "enum", required: false, defaultValue: "0", title: "Automatic debug Log Disable Timeout?", width: 3,  \
-                        options: [ "0":"None", "1800":"30 Minutes", "3600":"60 Minutes", "86400":"1 Day" ]
-            }
         }
     }
 }
@@ -187,33 +155,31 @@ def environmentPage() {
 // -----------------------------------------------------------------------------
 
 String displayDayGroups() {
-    // Process pending duration save
     if (state.duraTimeBtn && settings.DuraTime != null) {
-        def nIndex = state.duraTimeBtn.toString()
-        if (state.dayGroup.containsKey(nIndex)) { state.dayGroup[nIndex].duraTime = settings.DuraTime }
+        def targetIndex = state.duraTimeBtn.toString()
+        if (state.dayGroup.containsKey(targetIndex)) { state.dayGroup[targetIndex].duraTime = settings.DuraTime }
         state.remove("duraTimeBtn")
         app.removeSetting("DuraTime")
     }
 
-    // Process pending StartTime save & Chain Collision Logic
     if (state.startTimeBtn) {
-        def mode = settings.StartMode ?: "time"
-        if ((mode == "time" && settings.StartTime) || (mode == "after" && settings.StartAfter)) {
-            def nIndex = state.startTimeBtn.toString()
-            def newVal = mode == "time" ? Date.parse("yyyy-MM-dd'T'HH:mm:ss.SSSX", settings.StartTime).format('HH:mm') : settings.StartAfter
+        def inputMode = settings.StartMode ?: "time"
+        if ((inputMode == "time" && settings.StartTime) || (inputMode == "after" && settings.StartAfter)) {
+            def targetIndex = state.startTimeBtn.toString()
+            def targetValue = inputMode == "time" ? Date.parse("yyyy-MM-dd'T'HH:mm:ss.SSSX", settings.StartTime).format('HH:mm') : settings.StartAfter
             
-            boolean hasConflict = false
-            if (mode == "after") {
-                def conflict = state.dayGroup.find { k, v -> v.startTime == newVal && k.toString() != nIndex }
-                if (conflict) {
-                    hasConflict = true
-                    state.chainError = "<b>Error:</b> Day Group ${conflict.key} is already configured to follow Group ${newVal.replace('after_', '')}. Multiple groups cannot follow a single group. Please select a different trigger."
+            boolean configurationConflict = false
+            if (inputMode == "after") {
+                def collisionMatch = state.dayGroup.find { key, data -> data.startTime == targetValue && key.toString() != targetIndex }
+                if (collisionMatch) {
+                    configurationConflict = true
+                    state.chainError = "<b>Error:</b> Day Group ${collisionMatch.key} is already configured to follow Group ${targetValue.replace('after_', '')}. Multiple groups cannot follow a single group. Please select a different trigger."
                 }
             }
 
-            if (!hasConflict) {
+            if (!configurationConflict) {
                 state.remove("chainError")
-                if (state.dayGroup.containsKey(nIndex)) { state.dayGroup[nIndex].startTime = newVal }
+                if (state.dayGroup.containsKey(targetIndex)) { state.dayGroup[targetIndex].startTime = targetValue }
                 state.remove("startTimeBtn")
                 app.removeSetting("StartTime")
                 app.removeSetting("StartMode")
@@ -222,139 +188,144 @@ String displayDayGroups() {
         }
     }
 
-    // Button state toggles
     if (state.dayGroupBtn) {
-        def btnStr = state.dayGroupBtn.toString()
-        def len = btnStr.length()
-        def dgK = btnStr.substring(0, len - 1)
-        def dgI = btnStr.substring(len - 1)
-        if (state.dayGroup.containsKey(dgK)) { state.dayGroup[dgK][dgI] = !state.dayGroup[dgK][dgI] }
+        def buttonString = state.dayGroupBtn.toString()
+        def stringLength = buttonString.length()
+        def targetGroupId = buttonString.substring(0, stringLength - 1)
+        def targetDayIndex = buttonString.substring(stringLength - 1)
+        if (state.dayGroup.containsKey(targetGroupId)) { state.dayGroup[targetGroupId][targetDayIndex] = !state.dayGroup[targetGroupId][targetDayIndex] }
         state.remove("dayGroupBtn")
-        logDebug {"displayDayGroups Item: $dgK.$dgI"}
+        logDebug {"displayDayGroups Item: $targetGroupId.$targetDayIndex"}
     }
     
     if (state.overTempBtn) {
-        def dgK = state.overTempBtn.toString()
-        if (state.dayGroup.containsKey(dgK)) { state.dayGroup[dgK].ot = !state.dayGroup[dgK].ot }
+        def targetGroupId = state.overTempBtn.toString()
+        if (state.dayGroup.containsKey(targetGroupId)) { state.dayGroup[targetGroupId].ot = !state.dayGroup[targetGroupId].ot }
         state.remove("overTempBtn")
     }
 
     if (state.eraseTime) {
-        def nIndex = state.eraseTime.toString()
-        if (state.dayGroup.containsKey(nIndex)) { 
-            state.dayGroup[nIndex].startTime = null
-            state.dayGroup[nIndex].duraTime = null
+        def targetIndex = state.eraseTime.toString()
+        if (state.dayGroup.containsKey(targetIndex)) { 
+            state.dayGroup[targetIndex].startTime = null
+            state.dayGroup[targetIndex].duraTime = null
         }
         state.remove("eraseTime")
         app.removeSetting("eraseTime")
         paragraph "<script>{changeSubmit(this)}</script>"
     }
 
-    String str = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
-    str += "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:8px 8px;text-align:center;font-size:12px} .tstat-col td {font-size:15px }" +
+    String tableHtml = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
+    tableHtml += "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:8px 8px;text-align:center;font-size:12px} .tstat-col td {font-size:15px }" +
         "</style><div style='overflow-x:auto'><table class='mdl-data-table tstat-col' style=';border:2px solid black'>" +
         "<thead><tr style='border-bottom:2px solid black'>" +
         "<th style='border-right:2px solid black'>Day Group</th>" +
         "<th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th><th>Sun</th>" +
-        "<th>&nbsp;&nbsp;</th>" +
-        "<th colspan=2 style='color:#db7321;'>OverTemp</th>" +
+        "<th style='color:red;'>Delete</th>" +
+        "<th style='color:#db7321;'>OverTemp</th>" +
         "<th>Start Time</th><th>Duration</th><th>Reset</th>" +
         "</tr></thead><tr style='color:black'border = 1>" 
 
-    String X = "<i class='he-checkbox-checked'></i>"
-    String O = "<i class='he-checkbox-unchecked'></i>"
-    String Plus = "<i class='ic--sharp-plus'>+</i>"
-    String addDayGroupBtn = buttonLink("addDGBtn", Plus, "#1A77C9", "")
+    String iconChecked = "<i class='he-checkbox-checked'></i>"
+    String iconUnchecked = "<i class='he-checkbox-unchecked'></i>"
+    String iconPlus = "<i class='ic--sharp-plus'>+</i>"
+    String buttonAddGroup = buttonLink("addDGBtn", iconPlus, "#1A77C9", "")
 
-    String strRows = ""
-    state.dayGroup.each { k, dg -> 
-        str += strRows
-        str += "<th>$k</th>"
-        for (int r = 1; r < 8; r++) { 
-            String dayBoxN = buttonLink("w$k$r", O, "#1A77C9", "")
-            String dayBoxY = buttonLink("w$k$r", X, "#1A77C9", "")
-            str += (dg."$r") ? "<th>$dayBoxY</th>" : "<th>$dayBoxN</th>" 
+    String htmlRows = ""
+    state.dayGroup.each { groupId, groupData -> 
+        tableHtml += htmlRows
+        tableHtml += "<th>$groupId</th>"
+        for (int dayIndex = 1; dayIndex < 8; dayIndex++) { 
+            String buttonDayOff = buttonLink("w${groupId}${dayIndex}", iconUnchecked, "#1A77C9", "")
+            String buttonDayOn = buttonLink("w${groupId}${dayIndex}", iconChecked, "#1A77C9", "")
+            tableHtml += (groupData."$dayIndex") ? "<th>$buttonDayOn</th>" : "<th>$buttonDayOff</th>" 
         }
-        String remDayGroupBtn = buttonLink("rem$k", "<i style=\"font-size:1.125rem\" class=\"material-icons he-bin\"></i>", "#1A77C9", "")
-        str += "<th>$remDayGroupBtn</th>"
         
-        String otBoxN = buttonLink("o$k", O, "#db7321", "")
-        String otBoxY = buttonLink("o$k", X, "#db7321", "")
-        str += (dg."ot") ? "<th>$otBoxY</th>" : "<th>$otBoxN</th>" 
+        // Swapped proprietary Hubitat icon for guaranteed Iconify render
+        String buttonRemoveGroup = buttonLink("rem$groupId", "<iconify-icon icon='mdi:trash-can-outline'></iconify-icon>", "red", "22px")
+        tableHtml += "<th>$buttonRemoveGroup</th>"
         
-        String rawTime = state.dayGroup[k]?.startTime
-        String sTimeDisp = rawTime ? (rawTime.startsWith("after_") ? "After Grp ${rawTime.split('_')[1]}" : rawTime) : "Set Time"
-        String sTime = rawTime ? buttonLink("t$k", sTimeDisp, "black") : buttonLink("t$k", "Set Time", "green")
-        String dTime = state.dayGroup[k]?.duraTime 
-        String duraTime = dTime ? buttonLink("n$k", dTime, "purple") : buttonLink("n$k", "Select", "green")
+        String buttonTempOff = buttonLink("o$groupId", iconUnchecked, "#db7321", "")
+        String buttonTempOn = buttonLink("o$groupId", iconChecked, "#db7321", "")
+        tableHtml += (groupData."ot") ? "<th>$buttonTempOn</th>" : "<th>$buttonTempOff</th>" 
         
-        String reset = buttonLink("x$k", "<iconify-icon icon='bx:reset'></iconify-icon>", "black", "20px")
-        str += "<th>$sTime</th><th>$duraTime</th><th title='Reset $k' style='padding:0px 0px'>$reset</th>"
-        strRows = "</tr><tr>" 
+        String rawStartTime = state.dayGroup[groupId]?.startTime
+        String startTimeDisplay = rawStartTime ? (rawStartTime.startsWith("after_") ? "After Grp ${rawStartTime.split('_')[1]}" : rawStartTime) : "Set Time"
+        String buttonStartTime = rawStartTime ? buttonLink("t$groupId", startTimeDisplay, "black") : buttonLink("t$groupId", "Set Time", "green")
+        
+        String savedDuration = state.dayGroup[groupId]?.duraTime 
+        String buttonDuration = savedDuration ? buttonLink("n$groupId", savedDuration, "purple") : buttonLink("n$groupId", "Select", "green")
+        
+        String buttonReset = buttonLink("x$groupId", "<iconify-icon icon='bx:reset'></iconify-icon>", "black", "20px")
+        tableHtml += "<th>$buttonStartTime</th><th>$buttonDuration</th><th title='Reset $groupId' style='padding:0px 0px'>$buttonReset</th>"
+        htmlRows = "</tr><tr>" 
     }
-    str += "</tr><tr>"
-    str += "<th>$addDayGroupBtn</th><th colspan=4> <- Add new Day Group</th><th colspan=8>&nbsp;</th>"
-    str += "</tr></table></div>"
-    return str
+    tableHtml += "</tr><tr>"
+    tableHtml += "<th>$buttonAddGroup</th><th colspan=4> <- Add new Day Group</th><th colspan=8>&nbsp;</th>"
+    tableHtml += "</tr></table></div>"
+    return tableHtml
 }
 
 def displayStartTime() {
     if(state.startTimeBtn) {
-        def startTimeBtn = state.startTimeBtn.toString()
-        def currentVal = state.dayGroup[startTimeBtn]?.startTime
-        def isAfter = currentVal?.toString()?.startsWith("after_")
-        def effectiveMode = settings.StartMode ?: (isAfter ? "after" : "time")
+        def targetIndex = state.startTimeBtn.toString()
+        def currentStartTime = state.dayGroup[targetIndex]?.startTime
+        def isChainedGroup = currentStartTime?.toString()?.startsWith("after_")
+        def effectiveRenderMode = settings.StartMode ?: (isChainedGroup ? "after" : "time")
 
-        input "StartMode", "enum", title: "Start Trigger", submitOnChange: true, width: 3, options: ["time":"Scheduled Time", "after":"After Day Group"], defaultValue: isAfter ? "after" : "time"
+        input "StartMode", "enum", title: "Start Trigger", submitOnChange: true, width: 3, options: ["time":"Scheduled Time", "after":"After Day Group"], defaultValue: isChainedGroup ? "after" : "time"
         
-        if (effectiveMode == "after") {
-            def groupOpts = [:]
-            state.dayGroup.each { k, v -> if (k.toString() != startTimeBtn) groupOpts["after_${k}"] = "Day Group ${k}" }
-            input "StartAfter", "enum", title: "Select Group", submitOnChange: true, width: 3, options: groupOpts, defaultValue: isAfter ? currentVal : null, newLineAfter: false
+        if (effectiveRenderMode == "after") {
+            def availableGroups = [:]
+            state.dayGroup.each { key, data -> if (key.toString() != targetIndex) availableGroups["after_${key}"] = "Day Group ${key}" }
+            input "StartAfter", "enum", title: "Select Group", submitOnChange: true, width: 3, options: availableGroups, defaultValue: isChainedGroup ? currentStartTime : null, newLineAfter: false
             
             if (state.chainError) {
                 paragraph "<div style='color:red; padding-top: 4px'>${state.chainError}</div>"
             }
         } else {
-            input "StartTime", "time", title: "At This Time", submitOnChange: true, width: 3, defaultValue: isAfter ? null : currentVal, newLineAfter: false
+            input "StartTime", "time", title: "At This Time", submitOnChange: true, width: 3, defaultValue: isChainedGroup ? null : currentStartTime, newLineAfter: false
         }
-        input "DoneTime$startTimeBtn", "button", title: "  Done with time  ", width: 2, newLineAfter: true
+        input "DoneTime$targetIndex", "button", title: "  Done with time  ", width: 2, newLineAfter: true
     }
 }
 
 def displayDuration() {
     if(state.duraTimeBtn) {
-        def duraTimeBtn = state.duraTimeBtn.toString()
-        def currentVal = state.dayGroup[duraTimeBtn]?.duraTime
-        input "DuraTime", "decimal", title: "Sprinkler Duration", submitOnChange: true, width: 4, range: "0..60", defaultValue: currentVal, newLineAfter: true
+        def targetIndex = state.duraTimeBtn.toString()
+        def savedDuration = state.dayGroup[targetIndex]?.duraTime
+        input "DuraTime", "decimal", title: "Sprinkler Duration", submitOnChange: true, width: 4, range: "0..60", defaultValue: savedDuration, newLineAfter: true
     }
 }
 
 String displayGrpSched() {
-    String str = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
-    str += "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:8px 8px;text-align:center;font-size:12px} .tstat-col td {font-size:15px }" +
+    String tableHtml = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
+    tableHtml += "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:8px 8px;text-align:center;font-size:12px} .tstat-col td {font-size:15px }" +
         "</style><div style='overflow-x:auto'><table class='mdl-data-table tstat-col' style=';border:2px solid black'>" +
         "<thead><tr style='border-bottom:2px solid black'>" +
         "<th style='border-right:2px solid black'>Valve</th>" +
         "<th>Day Group</th>" +
         "</tr></thead>"
 
-    state.valves.keySet().findAll { k -> !(k in valves.id) }.each { k -> state.valves.remove(k) }
-    valves?.sort{it.displayName.toLowerCase()}.each { dev ->
-        String devLink = "<a href='/device/edit/$dev.id' target='_blank' title='Open Device Page for $dev'>$dev"
-        String myDG = state.valves[dev.id].dayGroup.join(', ')
-        String myDayGroup = myDG ? buttonLink("r$dev.id", myDG, "purple") : buttonLink("r$dev.id", "Select", "green")
-        str += "<tr style='color:black'><td style='border-right:2px solid black'>$devLink</td>" +
-            "<td title='${myDG ? "Deselect $myDG" : "Select String Hub Variable"}'>$myDayGroup</td></tr>"
+    state.valves.keySet().findAll { deviceId -> !(deviceId in valves.id) }.each { orphanedId -> state.valves.remove(orphanedId) }
+    valves?.sort{it.displayName.toLowerCase()}.each { hardwareDevice ->
+        String deviceLinkHtml = "<a href='/device/edit/$hardwareDevice.id' target='_blank' title='Open Device Page for $hardwareDevice'>$hardwareDevice"
+        String assignedGroups = state.valves[hardwareDevice.id].dayGroup.join(', ')
+        String buttonGroupSelection = assignedGroups ? buttonLink("r$hardwareDevice.id", assignedGroups, "purple") : buttonLink("r$hardwareDevice.id", "Select", "green")
+        tableHtml += "<tr style='color:black'><td style='border-right:2px solid black'>$deviceLinkHtml</td>" +
+            "<td title='${assignedGroups ? "Deselect $assignedGroups" : "Select String Hub Variable"}'>$buttonGroupSelection</td></tr>"
     }  
-    str += "</table></div>"
-    return str
+    tableHtml += "</table></div>"
+    return tableHtml
 }
 
 def selectDayGroup() {
     if(state.dayGrpBtn) {
-        List vars = state.dayGroup.keySet().collect() 
-        input "DayGroup", "enum", title: "Sprinkler Group", submitOnChange: true, width: 4, options: vars, newLineAfter: true, multiple: true
+        List availableGroups = state.dayGroup.keySet().collect() 
+        def currentSelection = state.valves[state.dayGrpBtn]?.dayGroup ?: []
+        
+        input "DayGroup", "enum", title: "Sprinkler Group", submitOnChange: true, width: 4, options: availableGroups, defaultValue: currentSelection, newLineAfter: true, multiple: true
+        
         if(DayGroup) {
             state.valves[state.dayGrpBtn].dayGroup = DayGroup
             state.remove("dayGrpBtn")
@@ -364,39 +335,91 @@ def selectDayGroup() {
     }
 }
 
-def addDayGroup(evt = null) {
-    def dayGroupTemplate = [ '1': false, '2': false, '3': false, '4': false, '5': false, '6': false, '7': false, "s": "P", "name": "", "ot": false, "ra": false, "duraTime": null, "startTime": null ]
-    def newIndex = (state.dayGroup.size() + 1).toString() 
-    state.dayGroup[newIndex] = dayGroupTemplate.clone()
+def addDayGroup(eventTrigger = null) {
+    def templateMap = [ '1': false, '2': false, '3': false, '4': false, '5': false, '6': false, '7': false, "s": "P", "name": "", "ot": false, "ra": false, "duraTime": null, "startTime": null ]
+    
+    // Clone map to force Hubitat database serialization
+    def clonedGroups = [:]
+    state.dayGroup.each { k, v -> clonedGroups[k] = v }
+    
+    def targetIndex = (clonedGroups.size() + 1).toString() 
+    clonedGroups[targetIndex] = templateMap.clone()
+    
+    state.dayGroup = clonedGroups
 }
 
-def remDayGroup(evt = null) {
+def remDayGroup(eventTrigger = null) {
     if (state.dayGroup.size() > 1) {
-        def keyToDelete = evt.toString()
-        if (state.dayGroup.containsKey(keyToDelete)) { state.dayGroup.remove(keyToDelete) } 
-        def dayGrpReOrder = [:]
-        def counter = 1
-        state.dayGroup.sort { it.key.toInteger() }.each { k, v -> dayGrpReOrder["${counter++}"] = v }
-        state.dayGroup = dayGrpReOrder
+        def targetGroupId = eventTrigger.toString()
+        
+        def clonedGroups = [:]
+        state.dayGroup.each { k, v -> clonedGroups[k] = v }
+        
+        if (clonedGroups.containsKey(targetGroupId)) { 
+            clonedGroups.remove(targetGroupId) 
+        } 
+        
+        def reorderedGroups = [:]
+        def oldToNewMapping = [:] 
+        def loopCounter = 1
+        
+        // Re-index remaining groups sequentially and create a translation map
+        clonedGroups.keySet().collect { it.toInteger() }.sort().each { oldKeyInt ->
+            def oldKey = oldKeyInt.toString()
+            def newKey = loopCounter.toString()
+            reorderedGroups[newKey] = clonedGroups[oldKey]
+            oldToNewMapping[oldKey] = newKey
+            loopCounter++
+        }
+        
+        // Repair cascading 'after_X' start times to match the shifted IDs
+        reorderedGroups.each { key, data ->
+            if (data.startTime?.startsWith("after_")) {
+                def chainedTarget = data.startTime.split('_')[1]
+                if (chainedTarget == targetGroupId) {
+                    data.startTime = null // The group it followed was deleted, reset to manual time
+                } else if (oldToNewMapping[chainedTarget]) {
+                    data.startTime = "after_${oldToNewMapping[chainedTarget]}" // Update the pointer
+                }
+            }
+        }
+        
+        // Repair the valve mappings so hardware isn't triggered by the wrong group
+        def clonedValves = [:]
+        state.valves.each { valveId, valveData ->
+            def updatedValveGroups = []
+            valveData.dayGroup.each { oldGrp ->
+                if (oldGrp != targetGroupId && oldToNewMapping[oldGrp]) {
+                    updatedValveGroups.add(oldToNewMapping[oldGrp])
+                }
+            }
+            valveData.dayGroup = updatedValveGroups
+            clonedValves[valveId] = valveData
+        }
+        
+        // Force top-level serialization for both arrays
+        state.dayGroup = reorderedGroups
+        state.valves = clonedValves
     }
 }
+
 
 // -----------------------------------------------------------------------------
 // Global Variable Rendering & Processing
 // -----------------------------------------------------------------------------
 
 String displayMonths() {
-    String str = "<i>Assume that Valve Duration is 100% and adjust that timing by these percentages, monthly. Valve Duration is reduced to the percentage defined for the month in which it runs. (20 seconds is the valve's minimum duration.) </i><p>"
-    str += "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:8px 8px;text-align:center;font-size:12px} .tstat-col td {font-size:15px }" +
+    String tableHtml = "<i>Assume that Valve Duration is 100% and adjust that timing by these percentages, monthly. Valve Duration is reduced to the percentage defined for the month in which it runs. (20 seconds is the valve's minimum duration.) </i><p>"
+    tableHtml += "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:8px 8px;text-align:center;font-size:12px} .tstat-col td {font-size:15px }" +
         "</style><div style='overflow-x:auto'><table class='mdl-data-table tstat-col' style=';border:2px solid black'>" +
         "<thead><tr style='border-bottom:2px solid black'><th>Jan</th><th>Feb</th><th>Mar</th><th>Apr</th><th>May</th><th>Jun</th><th>Jul</th><th>Aug</th><th>Sep</th><th>Oct</th><th>Nov</th><th>Dec</th></tr></thead>"
-    str += "<tr style='color:black'border = 1>" 
-    state.month2month.keySet().sort { it.toInteger() }.each { key ->
-        String mCol = buttonLink("m${key}", "${state.month2month[key]}", "purple")
-        str += "<th>$mCol</th>"
+    tableHtml += "<tr style='color:black'border = 1>" 
+    state.month2month.keySet().sort { it.toInteger() }.each { monthIndex ->
+        String columnHtml = buttonLink("m${monthIndex}", "${state.month2month[monthIndex]}", "purple")
+        tableHtml += "<th>$columnHtml</th>"
     }
-    str += "</tr></table></div>"
-    return str
+    tableHtml += "</tr></table></div>"
+    return tableHtml
 }
 
 def editMonths() {
@@ -412,21 +435,24 @@ def editMonths() {
 }
 
 def selectTemperatureDevice() {
-    paragraph "\n<b>Temperature Override</b>"
+    paragraph "\n<b>Overtemperature Sensor</b>"
     input "outdoorTempDevice", "capability.temperatureMeasurement", title: "Select which device?", multiple: false, required: false, submitOnChange: true
     input "maxOutdoorTemp", "number", title: "<i>Enter the Maximum temperature, beyond which, conditional Timetables will be invoked.</i>", defaultValue: maxOutdoorTemp, multiple: false, required: false, submitOnChange: true
 }
 
 def selectRainDevice() {
     paragraph "\n<b>Rain Device Selection</b>"
-    input "rainDeviceOutdoor", "capability.waterSensor", title: "Select which device?", multiple: true, required: false, submitOnChange: true
-    if (rainDeviceOutdoor) {
-        def vars = [:]
-        def c1=1
-        def atts = rainDeviceOutdoor?.collectMany { c2 -> c2.supportedAttributes.collect { it?.toString()?.toLowerCase() } }?.toSet()?.sort()
-        atts.each { v -> vars[c1++] = "$v" }
-        input "selectRainAttribute", "enum", options: vars, title: "<i>Which Attribute indicates there was enough rain to skip a cycle?</i>", defaultValue: selectRainAttribute, multiple: false, required: false, submitOnChange: true
-        state.currentRainAttribute = vars[selectRainAttribute as Integer]
+    input "rainDeviceOutdoor", "capability.waterSensor", title: "Select Rain Sensor <i>(If this sensor reports 'wet', watering is paused)</i>", multiple: false, required: false, submitOnChange: true
+    
+    if (settings.rainDeviceOutdoor) {
+        def deviceAttributes = [:]
+        def attributeCounter = 1
+        // Simplified attribute collection for a single device object
+        def attributeList = settings.rainDeviceOutdoor.supportedAttributes.collect { it?.toString()?.toLowerCase() }?.toSet()?.sort()
+        
+        attributeList.each { attributeString -> deviceAttributes[attributeCounter++] = "$attributeString" }
+        input "selectRainAttribute", "enum", options: deviceAttributes, title: "<i>Which Attribute indicates there was enough rain to skip a cycle?</i>", defaultValue: settings.selectRainAttribute, multiple: false, required: false, submitOnChange: true
+        state.currentRainAttribute = deviceAttributes[settings.selectRainAttribute as Integer]
     }	
 }
 
@@ -446,24 +472,22 @@ def updated() {
     
     unsubscribe()
     
-    // Temperature Evaluation & Subscription
     if (outdoorTempDevice) { 
-        subscribe(outdoorTempDevice, "temperature", "recvOutdoorTempHandler")
-		
-        def tempNowStr = outdoorTempDevice.currentValue("temperature")?.toString()
-        def maxTempStr = settings.maxOutdoorTemp?.toString()
+        subscribe(outdoorTempDevice, "temperature", "recvOutdoorTempHandler") 
         
-        // Auto-fill max temperature with current temperature if user left it blank
-        if (tempNowStr?.isNumber() && !maxTempStr?.isNumber()) {
-            logInfo {"No Maximum Temperature specified. Defaulting to current ambient temperature: ${tempNowStr}°"}
-            app.updateSetting("maxOutdoorTemp", [value: tempNowStr, type: "number"])
-            maxTempStr = tempNowStr
+        def currentAmbientTemp = outdoorTempDevice.currentValue("temperature")?.toString()
+        def configuredMaxTemp = settings.maxOutdoorTemp?.toString()
+        
+        if (currentAmbientTemp?.isNumber() && !configuredMaxTemp?.isNumber()) {
+            logInfo {"No Maximum Temperature specified. Defaulting to current ambient temperature: ${currentAmbientTemp}°"}
+            app.updateSetting("maxOutdoorTemp", [value: currentAmbientTemp, type: "number"])
+            configuredMaxTemp = currentAmbientTemp
         }
         
-        // Immediate baseline evaluation
-        if (tempNowStr?.isNumber() && maxTempStr?.isNumber()) {
-            state.overTempToday = new BigDecimal(tempNowStr) > new BigDecimal(maxTempStr)
-            logDebug {"Initial OutdoorTemp evaluation. Current: ${tempNowStr}, Max: ${maxTempStr}. overTempToday: ${state.overTempToday}"}
+        if (currentAmbientTemp?.isNumber() && configuredMaxTemp?.isNumber()) {
+            state.todayHighTemp = state.todayHighTemp ?: currentAmbientTemp
+            state.overTempToday = new BigDecimal(currentAmbientTemp) > new BigDecimal(configuredMaxTemp)
+            logDebug {"Initial OutdoorTemp evaluation. Current: ${currentAmbientTemp}, Max: ${configuredMaxTemp}. overTempToday: ${state.overTempToday}"}
         } else {
             state.overTempToday = false
         }
@@ -471,41 +495,32 @@ def updated() {
         state.overTempToday = false
     }
     
-    // Rain Sensor Evaluation & Subscription
     state.rainDeviceData = [:]
-    def rainAttr = state.currentRainAttribute?.toString()
+    def rainAttributeString = state.currentRainAttribute?.toString()
     
-    if (settings.rainDeviceOutdoor && rainAttr) {
-        settings.rainDeviceOutdoor.each { ard -> 
-            def ms1 = ard.label ?: ard.name
-            def devId = ard.id.toString()
-            state.rainDeviceData[devId] = [value: ard.currentValue(rainAttr)?.toString(), name: ms1]
-            subscribe(ard, rainAttr, "recvOutdoorRainHandler")
-        }
+    if (settings.rainDeviceOutdoor && rainAttributeString) {
+        def sensorDevice = settings.rainDeviceOutdoor
+        def sensorName = sensorDevice.label ?: sensorDevice.name
+        def sensorId = sensorDevice.id.toString()
+        def currentSensorValue = sensorDevice.currentValue(rainAttributeString)?.toString()
         
-        def activeRainDev = settings.rainEnableDevice?.toString()
-        if (activeRainDev && activeRainDev != "0") {
-            state.rainHold = state.rainDeviceData[activeRainDev]?.value?.toLowerCase() == "wet"
-            logDebug {"Initial OutdoorRain evaluation. rainHold: ${state.rainHold}"}
-        } else {
-            state.rainHold = false
-        }
+        state.rainDeviceData[sensorId] = [value: currentSensorValue, name: sensorName]
+        subscribe(sensorDevice, rainAttributeString, "recvOutdoorRainHandler")
+        
+        state.rainHold = currentSensorValue?.toLowerCase() == "wet"
+        logDebug {"Initial OutdoorRain evaluation. Active sensor monitored. rainHold: ${state.rainHold}"}
     } else {
         state.rainHold = false
     }
 
-    //getSoilTypeFromUSDA()
-	
     updateMyLabel(2)
     scheduleNext()
 }
 
-def initialize() {
-    // Retained for Hubitat framework consistency
-}
+def initialize() { }
 
-def init(why) {
-    switch(why) {            
+def init(reasonCode) {
+    switch(reasonCode) {            
         case 1: 
             if (!app.label) {
                 app.updateLabel(app.name)
@@ -522,12 +537,12 @@ def init(why) {
             if(state.month2month == null) state.month2month = ["1":"100", "2":"100", "3":"100", "4":"100", "5":"100", "6":"100", "7":"100", "8":"100", "9":"100", "10":"100", "11":"100", "12":"100"]
             if(state.dayGroup == null) state.dayGroup = ['1': ['1':true, '2':true, '3':true, '4':true, '5':true, '6':true, '7':true, "s": "P", "name": "", "ot": false, "ra": false, "duraTime": null, "startTime": null ] ] 
             
-            valves?.each { dev -> if(!state.valves["$dev.id"]) { state.valves["$dev.id"] = ['dayGroup':['1']] } } 
+            valves?.each { hardwareDevice -> if(!state.valves["$hardwareDevice.id"]) { state.valves["$hardwareDevice.id"] = ['dayGroup':['1']] } } 
             break; 
     }
 }
 
-void appButtonHandler(btn) {
+void appButtonHandler(btnTrigger) {
     state.remove("dayGroupBtn")
     state.remove("dayGrpBtn")
     state.remove("doneTime")
@@ -543,17 +558,17 @@ void appButtonHandler(btn) {
     app.removeSetting("DuraTime")
     app.removeSetting("monthPercentage")
 
-    if      ( btn == "btnSchEna")           toggleEnaSchBtn()
-	else if ( btn == "btnUsda")             getSoilTypeFromUSDA()
-    else if ( btn == "addDGBtn")            addDayGroup()
-    else if ( btn.startsWith("m")        )  state.dispMonthBtn = btn.minus("m")
-    else if ( btn.startsWith("rem")      )  remDayGroup(btn.minus("rem")) 
-    else if ( btn.startsWith("n")        )  state.duraTimeBtn = btn.minus("n")
-    else if ( btn.startsWith("r")        )  state.dayGrpBtn = btn.minus("r")
-    else if ( btn.startsWith("t")        )  state.startTimeBtn = btn.minus("t")
-    else if ( btn.startsWith("w")        )  state.dayGroupBtn = btn.minus("w")
-    else if ( btn.startsWith("o")        )  state.overTempBtn = btn.minus("o")
-    else if ( btn.startsWith("x")        )  state.eraseTime = btn.minus("x")
+    if      ( btnTrigger == "btnSchEna")           toggleEnaSchBtn()
+    else if ( btnTrigger == "btnUsda")             getSoilTypeFromUSDA()
+    else if ( btnTrigger == "addDGBtn")            addDayGroup()
+    else if ( btnTrigger.startsWith("m")        )  state.dispMonthBtn = btnTrigger.minus("m")
+    else if ( btnTrigger.startsWith("rem")      )  remDayGroup(btnTrigger.minus("rem")) 
+    else if ( btnTrigger.startsWith("n")        )  state.duraTimeBtn = btnTrigger.minus("n")
+    else if ( btnTrigger.startsWith("r")        )  state.dayGrpBtn = btnTrigger.minus("r")
+    else if ( btnTrigger.startsWith("t")        )  state.startTimeBtn = btnTrigger.minus("t")
+    else if ( btnTrigger.startsWith("w")        )  state.dayGroupBtn = btnTrigger.minus("w")
+    else if ( btnTrigger.startsWith("o")        )  state.overTempBtn = btnTrigger.minus("o")
+    else if ( btnTrigger.startsWith("x")        )  state.eraseTime = btnTrigger.minus("x")
 }
 
 // -----------------------------------------------------------------------------
@@ -564,15 +579,16 @@ def reschedule() {
     unschedule(reschedule)
     schedule('7 7 0 ? * *', reschedule) 
     state.overTempToday = false 
+    state.remove("todayHighTemp")
     runIn(15, scheduleNext)
 }
 
 def scheduleNext() {
-    String myLabel = app.label
-    if (app.label.contains('<span ')) { myLabel = app.label.substring(0, app.label.indexOf('<span ')) }
+    String appLabel = app.label
+    if (app.label.contains('<span ')) { appLabel = app.label.substring(0, app.label.indexOf('<span ')) }
     
-    hasZero = state.dayGroup.any { key, value -> value.any { it.value.toString() == "0" } } || state.valves?.isEmpty()
-    if (hasZero) {
+    def hasZeroConfiguration = state.dayGroup.any { groupId, groupData -> groupData.any { it.value.toString() == "0" } } || state.valves?.isEmpty()
+    if (hasZeroConfiguration) {
         logWarn {"Please set Time and Duration"}
         return
     }
@@ -580,116 +596,113 @@ def scheduleNext() {
     unschedule(reschedule)
     unschedule(schedHandler)
     schedule('7 7 0 ? * *', reschedule) 
-    logInfo {"Checking $myLabel Schedule."}
+    logInfo {"Checking $appLabel Schedule."}
     
     Calendar calendar = Calendar.getInstance();
-    def cronDay = calendar.get(Calendar.DAY_OF_WEEK);
-    def timings = buildTimings(cronDay)
-    if (!timings) {
-        logWarn {"Nothing scheduled for $myLabel Today."}
+    def currentDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK);
+    def futureTimings = buildTimings(currentDayOfWeek)
+    if (!futureTimings) {
+        logWarn {"Nothing scheduled for $appLabel Today."}
         return
     }
 
-    if (!schEnable) { logWarn {"Schedule Paused for $myLabel."}; return }
-    if (state.rainHold && rainEnableDevice && rainEnableDevice != "0") { logWarn {"Rain Hold possible for $myLabel Today."} }
+    if (!schEnable) { logWarn {"Schedule Paused for $appLabel."}; return }
+    if (state.rainHold) { logWarn {"Rain Hold possible for $appLabel Today."} }
+    
+	Date currentDate = new Date()
+    String formattedTimeNow = currentDate.format("HH:mm")
+    def hasValidSchedule = false
+    def startHour, startMinute, targetGroupId
 
-    Date date = new Date()
-    String akaNow = date.format("HH:mm")
-    def hasSched = false
-    def sth, stm, sk
-
-    for (timN in timings) {
-        sk = timN.key
-        if (timN.startTime.startsWith("after_")) continue
-        (sth, stm) = timN.startTime.split(':')
-        if (akaNow.replace(':', '').toInteger() >= timN.startTime.replace(':', '').toInteger()) continue
-        hasSched = true
+    for (scheduleEntry in futureTimings) {
+        targetGroupId = scheduleEntry.key
+        if (scheduleEntry.startTime.startsWith("after_")) continue
+        (startHour, startMinute) = scheduleEntry.startTime.split(':')
+        if (formattedTimeNow.replace(':', '').toInteger() >= scheduleEntry.startTime.replace(':', '').toInteger()) continue
+        hasValidSchedule = true
         break;
     }
 
-    if (hasSched) { 
-        schedule("0 ${stm} ${sth} ? * *", schedHandler, [data: ["dKey":"$sk"]]) 
-        logInfo {"$myLabel scheduled today."}
-        logDebug {"Scheduled events list for today: ${timings}"}
+    if (hasValidSchedule) { 
+        schedule("0 ${startMinute} ${startHour} ? * *", schedHandler, [data: ["targetGroupId":"$targetGroupId"]]) 
+        logInfo {"$appLabel scheduled today."}
+        logDebug {"Scheduled events list for today: ${futureTimings}"}
     } else {
-        logInfo {"Nothing scheduled for $myLabel today."}
+        logInfo {"Nothing scheduled for $appLabel today."}
     }
 }
 
-def schedHandler(data) {
+def schedHandler(payloadData) {
     unschedule(schedHandler)
-    String myLabel = app.label
-    if (app.label.contains('<span ')) { myLabel = app.label.substring(0, app.label.indexOf('<span ')) }
+    String appLabel = app.label
+    if (app.label.contains('<span ')) { appLabel = app.label.substring(0, app.label.indexOf('<span ')) }
     
-    logInfo {"Running $myLabel Schedule."}
-    String cd = data["dKey"] as String
-    def duraT = state.dayGroup."$cd".duraTime
+    logInfo {"Running $appLabel Schedule."}
+    String activeGroupId = payloadData["targetGroupId"] as String
+    def baseDurationMinutes = state.dayGroup."$activeGroupId".duraTime
 
-    if(state.dayGroup[cd].ot && !state.overTempToday) {
+    if(state.dayGroup[activeGroupId].ot && !state.overTempToday) {
         logInfo {"No Over Temperature today, skipping."}
         runIn(60, scheduleNext)
         return
     }
 
-    if (duraT == 0) {
+    if (baseDurationMinutes == 0) {
         logInfo {"Duration of 0, skipping."}
         runIn(60, scheduleNext)
         return	
     }
 
-    if (rainEnableDevice && rainEnableDevice != "0" && state.rainDeviceData[rainEnableDevice]?.value?.toLowerCase() == "wet") { 
-        logWarn {"Rain Hold - schedule skipped for $myLabel Today."}
+    if (state.rainHold) { 
+        logWarn {"Rain Hold - schedule skipped for $appLabel Today."}
         runIn(60, scheduleNext)
         return
-    }	
+    }
 
-    def valve2start = state.valves.findAll { it.value.dayGroup.contains(cd) }.keySet()
-    if (!valve2start) {
+    def pendingSwitches = state.valves.findAll { it.value.dayGroup.contains(activeGroupId) }.keySet()
+    if (!pendingSwitches) {
         logInfo {"No Switch in Day Group."}
         runIn(60, scheduleNext)
         return
     }
-    logDebug {"schedHandler: $cd, $state.dayGroup, valve2start: $valve2start"} 
+    logDebug {"schedHandler: target $activeGroupId, queue: $pendingSwitches"} 
 
-    String dgName = state.dayGroup[cd]?.name ? " (${state.dayGroup[cd].name})" : ""
-    logInfo {"Starting execution for Day Group $cd$dgName"}
+    String activeSwitchId = pendingSwitches[0] as String
+    if (activeSwitchId != null) { pendingSwitches = pendingSwitches.tail() }
 
-    String vk = valve2start[0] as String
-    if (vk != null) { valve2start = valve2start.tail() }
-
-    def currentValve = settings.valves?.find{it.id == "$vk"}
-    currentValve?.on()
-    logInfo {"Valve switch ${currentValve?.label ?: currentValve?.name} on."}
+    def hardwareSwitch = settings.valves?.find{it.id == "$activeSwitchId"}
+    hardwareSwitch?.on()
+    logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} on."}
     
     state.inCycle = true
     atomicState.cycleStart = now()
     updateMyLabel(3)
 
-    duraT = state.dayGroup."$cd".duraTime
-    def currentMonth = new Date().format("M") 	
-    def currentMonthPercentage = state.month2month ? state.month2month[currentMonth].toDouble() / 100 : 1  
-    def dura = 60 * duraT * currentMonthPercentage
-    def duraSeconds = Math.max(dura.toInteger(), 20) 
+    baseDurationMinutes = state.dayGroup."$activeGroupId".duraTime
+    def currentMonthInteger = new Date().format("M") 	
+    def seasonalMultiplier = state.month2month ? state.month2month[currentMonthInteger].toDouble() / 100 : 1  
+    def calculatedDurationSeconds = 60 * baseDurationMinutes * seasonalMultiplier
+    def safeDurationSeconds = Math.max(calculatedDurationSeconds.toInteger(), 20) 
     
-    logDebug {"runIn($duraSeconds, scheduleDurationHandler, [vKey: $vk, dS: $duraSeconds, dV: $valve2start, dKey: $cd])"}
-    runIn(duraSeconds, scheduleDurationHandler, [data: [vKey: "$vk", dS: "$duraSeconds", dV: "$valve2start", dKey: "$cd"]]) 
+    logDebug {"runIn($safeDurationSeconds, scheduleDurationHandler, [activeSwitchId: $activeSwitchId, pendingSwitches: $pendingSwitches, targetGroupId: $activeGroupId])"}
+    runIn(safeDurationSeconds, scheduleDurationHandler, [data: [activeSwitchId: "$activeSwitchId", durationSeconds: "$safeDurationSeconds", pendingSwitches: "$pendingSwitches", targetGroupId: "$activeGroupId"]]) 
 }
 
-def scheduleDurationHandler(data) {
+def scheduleDurationHandler(payloadData) {
     unschedule(scheduleDurationHandler)
-    String vk = data.vKey as String
-    String cd = data.dKey as String
-    def duraSeconds = data.dS.toInteger()
-    def valve2start = data.dV as String
-    logDebug {"schedDurHandler: valveStop: $vk, in Duration: $duraSeconds, next: $valve2start"}
+    String activeSwitchId = payloadData.activeSwitchId as String
+    String activeGroupId = payloadData.targetGroupId as String
+    def safeDurationSeconds = payloadData.durationSeconds.toInteger()
+    def pendingSwitches = payloadData.pendingSwitches as String
+    logDebug {"schedDurHandler: stopping switch $activeSwitchId, next queue: $pendingSwitches"}
 
-    def currentValve = settings.valves?.find{it.id == "$vk"}
-    currentValve?.off()
-    logInfo {"Valve switch ${currentValve?.label ?: currentValve?.name} off."}
+    def hardwareSwitch = settings.valves?.find{it.id == "$activeSwitchId"}
+    hardwareSwitch?.off()
+    logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} off."}
 
     pauseExecution(20000)
     
-    if (state.rainHold && rainEnableDevice && rainEnableDevice != "0") {
+    if (state.rainHold) {
         logWarn {"Rain Hold triggered mid-cycle. Aborting remaining zones."}
         state.inCycle = false
         atomicState.cycleEnd = now()
@@ -698,29 +711,29 @@ def scheduleDurationHandler(data) {
         return
     }
 
-    if (valve2start != '[]') {
-        valve2start = valve2start.replaceAll(/\[|\]/, '').split(',').collect { it.trim().toInteger() }
-        String nextVk = valve2start[0] as String
-        if (nextVk != null) {
-            valve2start = valve2start.tail()
-            currentValve = settings.valves?.find{it.id == "$nextVk"}
-            currentValve?.on()
-            logInfo {"Valve switch ${currentValve?.label ?: currentValve?.name} on."}
-            runIn(duraSeconds, scheduleDurationHandler, [data: [vKey: "$nextVk", dS: "$duraSeconds", dV: "$valve2start", dKey: "$cd"]])
+    if (pendingSwitches != '[]') {
+        pendingSwitches = pendingSwitches.replaceAll(/\[|\]/, '').split(',').collect { it.trim().toInteger() }
+        String nextSwitchId = pendingSwitches[0] as String
+        if (nextSwitchId != null) {
+            pendingSwitches = pendingSwitches.tail()
+            hardwareSwitch = settings.valves?.find{it.id == "$nextSwitchId"}
+            hardwareSwitch?.on()
+            logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} on."}
+            runIn(safeDurationSeconds, scheduleDurationHandler, [data: [activeSwitchId: "$nextSwitchId", durationSeconds: "$safeDurationSeconds", pendingSwitches: "$pendingSwitches", targetGroupId: "$activeGroupId"]])
         }
     } else {
         Calendar calendar = Calendar.getInstance();
-        def cronDay = calendar.get(Calendar.DAY_OF_WEEK);
-        Map aWeek = [1:'7', 2:'1', 3:'2', 4:'3', 5:'4', 6:'5', 7:'6']
-        def todayIndex = aWeek[cronDay]
+        def currentDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK);
+        Map cronWeekTranslation = [1:'7', 2:'1', 3:'2', 4:'3', 5:'4', 6:'5', 7:'6']
+        def translatedDayIndex = cronWeekTranslation[currentDayOfWeek]
 
-        def cascadedGroup = state.dayGroup.find { k, v ->
-            v[todayIndex] == true && v.startTime == "after_${cd}"
+        def cascadedGroupData = state.dayGroup.find { groupId, groupData ->
+            groupData[translatedDayIndex] == true && groupData.startTime == "after_${activeGroupId}"
         }
 
-        if (cascadedGroup) {
-            logInfo {"Day Group $cd complete. Cascading to dependent Day Group ${cascadedGroup.key}."}
-            runIn(20, schedHandler, [data: ["dKey": cascadedGroup.key]])
+        if (cascadedGroupData) {
+            logInfo {"Day Group $activeGroupId complete. Cascading to dependent Day Group ${cascadedGroupData.key}."}
+            runIn(20, schedHandler, [data: ["targetGroupId": cascadedGroupData.key]])
         } else {
             state.inCycle = false
             atomicState.cycleEnd = now()
@@ -730,45 +743,54 @@ def scheduleDurationHandler(data) {
     }
 }
 
-def buildTimings(cronDayOf) {
-    Map aWeek = [1:'7', 2:'1', 3:'2', 4:'3', 5:'4', 6:'5', 7:'6']
-    def result = state.dayGroup.findAll { key, value -> value[aWeek[cronDayOf]] == true }.keySet()
-    return result.collect { key -> [key: key, duraTime: state.dayGroup[key]?.duraTime, startTime: state.dayGroup[key]?.startTime]}.findAll { it.startTime != null }.sort { it.startTime.startsWith("after_") ? "99:99" : it.startTime } 
+def buildTimings(cronDayIndex) {
+    Map cronWeekTranslation = [1:'7', 2:'1', 3:'2', 4:'3', 5:'4', 6:'5', 7:'6']
+    def scheduledGroupKeys = state.dayGroup.findAll { groupId, groupData -> groupData[cronWeekTranslation[cronDayIndex]] == true }.keySet()
+    return scheduledGroupKeys.collect { groupId -> [key: groupId, duraTime: state.dayGroup[groupId]?.duraTime, startTime: state.dayGroup[groupId]?.startTime]}.findAll { it.startTime != null }.sort { it.startTime.startsWith("after_") ? "99:99" : it.startTime } 
 }
 
 // -----------------------------------------------------------------------------
 // Sensor Callbacks & API Methods
 // -----------------------------------------------------------------------------
 
-def recvOutdoorTempHandler(evt) {
-    def currentTempStr = evt?.value?.toString()
-    def maxTempStr = settings.maxOutdoorTemp?.toString()
+def recvOutdoorTempHandler(hardwareEvent) {
+    def currentTempString = hardwareEvent?.value?.toString()
+    def configuredMaxTemp = settings.maxOutdoorTemp?.toString()
     
-    // Log every hardware event regardless of latch state for observability
-    logDebug {"OutdoorTemp Event Received - Ambient: ${currentTempStr}°, Max Limit: ${maxTempStr}°. Current Latch State: ${state.overTempToday}"}
+    // Track the highest temperature recorded today
+    if (currentTempString?.isNumber()) {
+        def currentTempNum = new BigDecimal(currentTempString)
+        def recordedHighNum = state.todayHighTemp ? new BigDecimal(state.todayHighTemp.toString()) : currentTempNum
+        if (currentTempNum >= recordedHighNum) {
+            state.todayHighTemp = currentTempString
+        }
+    }
+    
+    logDebug {"OutdoorTemp Event Received - Ambient: ${currentTempString}°, Max Limit: ${configuredMaxTemp}°. Current Latch State: ${state.overTempToday}"}
 
     if (!state.overTempToday) { 
-        if (currentTempStr?.isNumber() && maxTempStr?.isNumber()) {
-            state.overTempToday = new BigDecimal(currentTempStr) > new BigDecimal(maxTempStr) 
-            
-            // Alert the user when the state machine permanently flips for the day
+        if (currentTempString?.isNumber() && configuredMaxTemp?.isNumber()) {
+            state.overTempToday = new BigDecimal(currentTempString) > new BigDecimal(configuredMaxTemp) 
             if (state.overTempToday) {
                 logInfo {"Maximum temperature threshold crossed. OverTemp schedules are unlocked for the remainder of the day."}
             }
         } else {
-            logWarn {"OutdoorTemp evaluation bypassed: Malformed or null telemetry. Current: ${currentTempStr}, Max: ${maxTempStr}"}
+            logWarn {"OutdoorTemp evaluation bypassed: Malformed or null telemetry. Current: ${currentTempString}, Max: ${configuredMaxTemp}"}
         }
     }
 }
 
-def recvOutdoorRainHandler(evt) {
-    def targetDevice = settings.rainEnableDevice?.toString()
-    def evtDeviceId = evt?.deviceId?.toString()
+def recvOutdoorRainHandler(hardwareEvent) {
+    def eventDeviceId = hardwareEvent?.deviceId?.toString()
+    def configuredSensorId = settings.rainDeviceOutdoor?.id?.toString()
     
-    if (targetDevice && targetDevice != "0" && targetDevice == evtDeviceId) {
-        state.rainDeviceData[evtDeviceId] = [ value: evt?.value, name : evt?.displayName ]
-        state.rainHold = evt?.value?.toString()?.toLowerCase() == "wet"
-        logDebug {"OutdoorRain update from Device. rainHold: $state.rainHold"}
+    if (configuredSensorId && configuredSensorId == eventDeviceId) {
+        state.rainDeviceData[eventDeviceId] = [ value: hardwareEvent?.value, name : hardwareEvent?.displayName ]
+        
+        // Direct boolean latch based on singular hardware endpoint
+        state.rainHold = hardwareEvent?.value?.toString()?.toLowerCase() == "wet"
+        
+        logDebug {"OutdoorRain update from Device. rainHold: ${state.rainHold}"}
     }
 }
 
@@ -779,70 +801,70 @@ def getSoilTypeFromUSDA() {
         state.geo.lon = location?.longitude
         logInfo {"Using lat/lon from hub location"}
     }
-    def lat = state.geo?.lat
-    def lon = state.geo?.lon
-    if(!lat || !lon) {
+    def geoLat = state.geo?.lat
+    def geoLon = state.geo?.lon
+    if(!geoLat || !geoLon) {
         state.usdaSoilMsg = "Hub coordinates unavailable."
         logWarn {"${state.usdaSoilMsg}"}
         return
     }
-    def sda = getSoilData(lat, lon)
-    if(!sda || !sda.textureMapped) {
-        state.usdaSoilMsg = "No USDA data returned for (${lat},${lon})"
+    def soilDataPayload = getSoilData(geoLat, geoLon)
+    if(!soilDataPayload || !soilDataPayload.textureMapped) {
+        state.usdaSoilMsg = "No USDA data returned for (${geoLat},${geoLon})"
         logWarn {"${state.usdaSoilMsg}"}
         return
     }
-    def mapped = sda.textureMapped
-    def raw = sda.textureRaw ?: "n/a"
-    def hyd = sda.hydgrp ?: "n/a"
-    state.defaultSoilType = mapped
-    state.defaultHydgrp = hyd
-    state.usdaSoilMsg = "USDA soil detected: ${mapped} (USDA: ${raw}, Group ${hyd})"
+    def soilMapped = soilDataPayload.textureMapped
+    def soilRaw = soilDataPayload.textureRaw ?: "n/a"
+    def soilHydgrp = soilDataPayload.hydgrp ?: "n/a"
+    state.defaultSoilType = soilMapped
+    state.defaultHydgrp = soilHydgrp
+    state.usdaSoilMsg = "USDA soil detected: ${soilMapped} (USDA: ${soilRaw}, Group ${soilHydgrp})"
     logInfo {"Soil: ${state.usdaSoilMsg}"}
 }
 
-def getSoilData(lat, lon) {
-    def d = 0.0001
-    def poly = "POLYGON((${lon-d} ${lat-d},${lon+d} ${lat-d},${lon+d} ${lat+d},${lon-d} ${lat+d},${lon-d} ${lat-d}))"
-    def query = """SELECT TOP 1 mapunit.musym, mapunit.muname, component.compname, component.hydgrp, chtexturegrp.texdesc FROM mapunit INNER JOIN component ON component.mukey = mapunit.mukey INNER JOIN chorizon ON chorizon.cokey = component.cokey INNER JOIN chtexturegrp ON chtexturegrp.chkey = chorizon.chkey WHERE mapunit.mukey IN ( SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('${poly}') )"""
-    def params = [uri: "https://sdmdataaccess.nrcs.usda.gov/tabular/post.rest", contentType: "application/x-www-form-urlencoded", body: [query: query], timeout: 20]
+def getSoilData(geoLat, geoLon) {
+    def geoDelta = 0.0001
+    def polygonWkt = "POLYGON((${geoLon-geoDelta} ${geoLat-geoDelta},${geoLon+geoDelta} ${geoLat-geoDelta},${geoLon+geoDelta} ${geoLat+geoDelta},${geoLon-geoDelta} ${geoLat+geoDelta},${geoLon-geoDelta} ${geoLat-geoDelta}))"
+    def sqlQuery = """SELECT TOP 1 mapunit.musym, mapunit.muname, component.compname, component.hydgrp, chtexturegrp.texdesc FROM mapunit INNER JOIN component ON component.mukey = mapunit.mukey INNER JOIN chorizon ON chorizon.cokey = component.cokey INNER JOIN chtexturegrp ON chtexturegrp.chkey = chorizon.chkey WHERE mapunit.mukey IN ( SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('${polygonWkt}') )"""
+    def httpParams = [uri: "https://sdmdataaccess.nrcs.usda.gov/tabular/post.rest", contentType: "application/x-www-form-urlencoded", body: [query: sqlQuery], timeout: 20]
 
     try {
-        def respText = ''
-        httpPost(params) { r ->
-            def t = r?.data
-            def tn = t?.class?.name ?: ''
-            respText = (tn.contains('InputStream') || tn.contains('Reader')) ? t?.getText('UTF-8') : t?.toString()
+        def responseText = ''
+        httpPost(httpParams) { httpResponse ->
+            def responsePayload = httpResponse?.data
+            def responseClassName = responsePayload?.class?.name ?: ''
+            responseText = (responseClassName.contains('InputStream') || responseClassName.contains('Reader')) ? responsePayload?.getText('UTF-8') : responsePayload?.toString()
         }
-        if (!respText) { logWarn {"getSoilData(): empty SDA response for (${lat},${lon})"}; return null }
+        if (!responseText) { logWarn {"getSoilData(): empty SDA response for (${geoLat},${geoLon})"}; return null }
         
-        respText = respText.substring(respText.indexOf("<"))
-        def m = respText =~ /(?s)<Table>(.*?)<\/Table>/
-        if (!m.find()) { logWarn {"getSoilData(): no <Table> block in SDA response"}; return null }
+        responseText = responseText.substring(responseText.indexOf("<"))
+        def tableMatcher = responseText =~ /(?s)<Table>(.*?)<\/Table>/
+        if (!tableMatcher.find()) { logWarn {"getSoilData(): no <Table> block in SDA response"}; return null }
         
-        def tableXML = "<Table>${m.group(1)}</Table>"
-        tableXML = tableXML.replaceAll(/&(?![a-zA-Z]+;|#\d+;)/, '&amp;')
-        def xml = new XmlSlurper(false, false).parseText(tableXML)
+        def tableXmlString = "<Table>${tableMatcher.group(1)}</Table>"
+        tableXmlString = tableXmlString.replaceAll(/&(?![a-zA-Z]+;|#\d+;)/, '&amp;')
+        def xmlPayload = new XmlSlurper(false, false).parseText(tableXmlString)
         
-        def musym = xml?.musym?.text() ?: ''
-        def muname = xml?.muname?.text() ?: ''
-        def compname = xml?.compname?.text() ?: ''
-        def hydgrp = xml?.hydgrp?.text() ?: ''
-        def texdesc = xml?.texdesc?.text() ?: ''
-        if (!texdesc && !muname){ logWarn {"getSoilData(): no soil data for (${lat},${lon})"}; return null }
-        return [musym: musym, muname: muname, compname: compname, hydgrp: hydgrp, textureRaw: texdesc, textureMapped: mapSoilTextureToClass(texdesc)]
-    } catch(e) { logWarn {"getSoilData() SDA error: ${e.message}"}; return null }
+        def attrMusym = xmlPayload?.musym?.text() ?: ''
+        def attrMuname = xmlPayload?.muname?.text() ?: ''
+        def attrCompname = xmlPayload?.compname?.text() ?: ''
+        def attrHydgrp = xmlPayload?.hydgrp?.text() ?: ''
+        def attrTexdesc = xmlPayload?.texdesc?.text() ?: ''
+        if (!attrTexdesc && !attrMuname){ logWarn {"getSoilData(): no soil data for (${geoLat},${geoLon})"}; return null }
+        return [musym: attrMusym, muname: attrMuname, compname: attrCompname, hydgrp: attrHydgrp, textureRaw: attrTexdesc, textureMapped: mapSoilTextureToClass(attrTexdesc)]
+    } catch(exception) { logWarn {"getSoilData() SDA error: ${exception.message}"}; return null }
 }
 
-def mapSoilTextureToClass(String texture) {
-    if(!texture) return "Loam"
-    def t = texture.toLowerCase().trim()
+def mapSoilTextureToClass(String soilTexture) {
+    if(!soilTexture) return "Loam"
+    def formattedTexture = soilTexture.toLowerCase().trim()
     switch(true) {
-        case {t == "sand" || t.contains("coarse sand") || t.contains("fine sand")}: return "Sand"
-        case {t.contains("loamy sand") || t.contains("sandy loam") || t.contains("fine sandy loam")}: return "Loamy Sand"
-        case {t.contains("loam") || t.contains("silt loam") || t.contains("silty clay loam") || t.contains("sandy clay loam")}: return "Loam"
-        case {t.contains("clay loam") || t.contains("silty clay") || t.contains("sandy clay")}: return "Clay Loam"
-        case {t == "clay" || t.contains("heavy clay") || t.contains("vertisol")}: return "Clay"
+        case {formattedTexture == "sand" || formattedTexture.contains("coarse sand") || formattedTexture.contains("fine sand")}: return "Sand"
+        case {formattedTexture.contains("loamy sand") || formattedTexture.contains("sandy loam") || formattedTexture.contains("fine sandy loam")}: return "Loamy Sand"
+        case {formattedTexture.contains("loam") || formattedTexture.contains("silt loam") || formattedTexture.contains("silty clay loam") || formattedTexture.contains("sandy clay loam")}: return "Loam"
+        case {formattedTexture.contains("clay loam") || formattedTexture.contains("silty clay") || formattedTexture.contains("sandy clay")}: return "Clay Loam"
+        case {formattedTexture == "clay" || formattedTexture.contains("heavy clay") || formattedTexture.contains("vertisol")}: return "Clay"
         default: return "Loam"
     }
 }
@@ -851,52 +873,52 @@ def mapSoilTextureToClass(String texture) {
 // UI Utilities
 // -----------------------------------------------------------------------------
 
-void updateMyLabel(num) {
+void updateMyLabel(lifecycleEvent) {
     String baseLabel = app.label?.with { contains('<span ') ? substring(0, indexOf('<span ')) : it } ?: ""
-    String status = ""
-    if (settings.schEnable != true) { status = '<span style="color:Crimson"> (inactive)</span>' } 
-    else if (atomicState.isPaused) { status = '<span style="color:Crimson"> (paused)</span>' } 
+    String statusHtml = ""
+    if (settings.schEnable != true) { statusHtml = '<span style="color:Crimson"> (inactive)</span>' } 
+    else if (atomicState.isPaused) { statusHtml = '<span style="color:Crimson"> (paused)</span>' } 
     else if (state.inCycle) {
-        def beganAt = atomicState.cycleStart ? "started ${fixDateTimeString(atomicState.cycleStart)}" : "running"
-        status = "<span style=\"color:Green\"> (${beganAt})</span>"
+        def stringBeganAt = atomicState.cycleStart ? "started ${fixDateTimeString(atomicState.cycleStart)}" : "running"
+        statusHtml = "<span style=\"color:Green\"> (${stringBeganAt})</span>"
     } else if (state.inCycle != null && !state.inCycle) {
-        def endedAt = atomicState.cycleEnd ? "finished ${fixDateTimeString(atomicState.cycleEnd)}" : "idle"
-        status = "<span style=\"color:Green\"> (${endedAt})</span>"
+        def stringEndedAt = atomicState.cycleEnd ? "finished ${fixDateTimeString(atomicState.cycleEnd)}" : "idle"
+        statusHtml = "<span style=\"color:Green\"> (${stringEndedAt})</span>"
     }
-    String newLabel = baseLabel + status
-    if (app.label != newLabel) { app.updateLabel(newLabel) }
+    String consolidatedLabel = baseLabel + statusHtml
+    if (app.label != consolidatedLabel) { app.updateLabel(consolidatedLabel) }
 }
 
-String fixDateTimeString(eventDate) {
-    def target = new Date(eventDate)
-    def today = new Date().clearTime()
-    def yesterday = new Date(today.time - 1 * 24 * 60 * 60 * 1000) 
-    def tomorrow = new Date(today.time + 1 * 24 * 60 * 60 * 1000) 
+String fixDateTimeString(eventTimestamp) {
+    def targetDate = new Date(eventTimestamp)
+    def dateToday = new Date().clearTime()
+    def dateYesterday = new Date(dateToday.time - 1 * 24 * 60 * 60 * 1000) 
+    def dateTomorrow = new Date(dateToday.time + 1 * 24 * 60 * 60 * 1000) 
 
-    String myDate = ''
-    boolean showTime = true
+    String dateString = ''
+    boolean renderTime = true
 
-    if (target.clearTime() == today) { myDate = 'today' } 
-    else if (target.clearTime() == yesterday) { myDate = 'yesterday' } 
-    else if (target.clearTime() == tomorrow) { myDate = 'tomorrow' } 
-    else if (target.format('yyyy-MM-dd') == '2035-01-01') { myDate = 'a long time from now'; showTime = false } 
-    else { myDate = "on ${target.format('MM-dd')}" }
+    if (targetDate.clearTime() == dateToday) { dateString = 'today' } 
+    else if (targetDate.clearTime() == dateYesterday) { dateString = 'yesterday' } 
+    else if (targetDate.clearTime() == dateTomorrow) { dateString = 'tomorrow' } 
+    else if (targetDate.format('yyyy-MM-dd') == '2035-01-01') { dateString = 'a long time from now'; renderTime = false } 
+    else { dateString = "on ${targetDate.format('MM-dd')}" }
 
-    target = new Date(eventDate)
-    String myTime = showTime ? target.format('h:mma').toLowerCase() : ''
-    return myTime ? "${myDate} at ${myTime}" : myDate
+    targetDate = new Date(eventTimestamp)
+    String timeString = renderTime ? targetDate.format('h:mma').toLowerCase() : ''
+    return timeString ? "${dateString} at ${timeString}" : dateString
 }
 
-void logDebug(Closure msg) {
-    if (settings.debugEnable) { log.debug "${msg()}" }
+void logDebug(Closure logMessage) {
+    if (settings.debugEnable) { log.debug "${logMessage()}" }
 }
 
-def logWarn(Closure msg) { 
-    log.warn "${msg()}"
+def logWarn(Closure logMessage) { 
+    log.warn "${logMessage()}"
 }
 
-def logInfo(Closure msg) {
-    if (settings.infoEnable) { log.info "${msg()}" }
+def logInfo(Closure logMessage) {
+    if (settings.infoEnable) { log.info "${logMessage()}" }
 }
 
 def logsOff() {
@@ -915,14 +937,14 @@ def installCheck() {
     }
 }
 
-String buttonLink(String btnName, String linkText, color = "#1A77C9", font = "15px") {
-    "<div class='form-group'><input type='hidden' name='${btnName}.type' value='button'></div><div><div class='submitOnChange' onclick='buttonClick(this)' style='color:$color;cursor:pointer;font-size:$font'>$linkText</div></div><input type='hidden' name='settings[$btnName]' value=''>"
+String buttonLink(String buttonName, String linkText, hexColor = "#1A77C9", fontSize = "15px") {
+    "<div class='form-group'><input type='hidden' name='${buttonName}.type' value='button'></div><div><div class='submitOnChange' onclick='buttonClick(this)' style='color:$hexColor;cursor:pointer;font-size:$fontSize'>$linkText</div></div><input type='hidden' name='settings[$buttonName]' value=''>"
 }
 
-def sectFormat(type, myText=""){ 
-    if(type == "line") return "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-    if(type == "title") return "<h2 style='color:#1A77C9;font-weight: bold'>${myText}</h2>"
-    if(type == "subTitle") return "<p style='color:#1A77C9;font-weight: bold; font-size: 1.4em;'>${myText}</p>"
+def sectFormat(formatType, textString=""){ 
+    if(formatType == "line") return "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+    if(formatType == "title") return "<h2 style='color:#1A77C9;font-weight: bold'>${textString}</h2>"
+    if(formatType == "subTitle") return "<p style='color:#1A77C9;font-weight: bold; font-size: 1.4em;'>${textString}</p>"
 }
 
 def displayHeader() {
@@ -932,12 +954,4 @@ def displayHeader() {
     }
 }
 
-private Integer timeToSeconds(String timeStr) {
-    if (!timeStr || timeStr.startsWith("after_")) return null
-    def parts = timeStr.split(':')
-    int h = parts[0].toInteger()
-    int m = parts[1].toInteger()
-    return (h * 3600) + (m * 60)
-}
-
-String menuHeader(titleText){"<div style=\"width:102%;background-color:#696969;color:white;padding:4px;font-weight: bold;box-shadow: 1px 2px 2px #bababa;margin-left: -10px\">${titleText}</div>"}
+String menuHeader(headerText){"<div style=\"width:102%;background-color:#696969;color:white;padding:4px;font-weight: bold;box-shadow: 1px 2px 2px #bababa;margin-left: -10px\">${headerText}</div>"}
