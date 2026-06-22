@@ -19,6 +19,7 @@ This code is licensed as follows:
 	Copyright (c) 2020, Matt Hammond
 	All rights reserved.
 -----------------------------------------------------------------------------
+ * Version 2.1.0: added evapiortranspiration calculation module.  --in work.
  * Version 2.0.3: bug fixes
  * Version 2.0.2: Pagination for the main page, removed support for valves
  * Version 2.0.1: Monolithic architecture consolidation. Semantic variable standardization.
@@ -42,6 +43,7 @@ preferences {
     page(name: "mainPage")
     page(name: "schedulePage")
     page(name: "environmentPage")
+	page(name: "etConfigPage")
 }
 
 def mainPage() {
@@ -63,6 +65,8 @@ def mainPage() {
             paragraph ""
             input "schEnable", "bool", title: "<b>Schedule Active?</b>", required: false, defaultValue: true, submitOnChange: true
             state.paused = schEnable ? false : true
+            
+            input "etEnable", "bool", title: "<b>Enable Smart Evapotranspiration (ET)?</b>", required: false, defaultValue: false, submitOnChange: true
 
             paragraph "\n<b>Switch Select</b>"
             input "valves",
@@ -77,14 +81,21 @@ def mainPage() {
             section(menuHeader("Configuration")) {
                 href "schedulePage", title: "Timetable Matrix", description: "Configure Day Groups, durations, and map switches.", state: "complete"
                 href "environmentPage", title: "Global Settings & Overrides", description: "Configure seasonal adjustments, rain holds, and temperature limits.", state: "complete"
-            }
+				if (settings.etEnable) {
+                    href "etConfigPage", title: "Evapotranspiration (ET) Config", description: "Map local weather telemetry and crop coefficients.", state: "complete"
+                }            }
 
             section(menuHeader("System Status")) {
                 def currentMonth = new Date().format("M") 	
                 def seasonalMultiplier = state.month2month ? state.month2month[currentMonth].toDouble() : 1  
                  
-  String statusHtml = "<div style='background-color: rgba(73, 163, 125, 0.3);'>"	
-                if (state.month2month) {
+                String statusHtml = "<div style='background-color: rgba(73, 163, 125, 0.3);'>"	
+                
+                if (settings.etEnable) {
+                    statusHtml += "<b>💧 Smart ET Scheduling</b> is <b>ACTIVE</b><br>" +
+                    "<b>Rain hold</b> is $state.rainHold<br>" +
+                    "<b>Soil</b> is $state.defaultSoilType<br>"
+                } else if (state.month2month) {
                     statusHtml += "<b>Adjust valve timing</b> by Month is active. Current month is: <b>$seasonalMultiplier%</b><br>" +
                     "<b>Rain hold</b> is $state.rainHold<br>" +
                     "<b>Soil</b> is $state.defaultSoilType<br>"
@@ -125,10 +136,16 @@ def schedulePage() {
             displayDuration()
             displayStartTime()
 
-            paragraph "<b>Select Switches into Day Groups</b>"
+            String switchHeaderText = settings.etEnable ? "<b>Select Switches into Day Groups & Hydraulics</b>" : "<b>Select Switches into Day Groups</b>"
+            paragraph switchHeaderText
+            paragraph getKcHelpHtml()
+            
             paragraph displayGrpSched()		
             selectDayGroup()
-
+            // Render individual inputs below the matrix
+            displayZoneKc()
+            displayZoneAppRate()
+			
             paragraph "\n<hr style='background-color:#1A77C9; height: 1px; border: 0;'></hr>"
         }
     }
@@ -150,9 +167,99 @@ def environmentPage() {
     }
 }
 
+def etConfigPage() {
+    dynamicPage(name: "etConfigPage", title: "Evapotranspiration (ET) Telemetry", uninstall: false, install: false) {
+        displayHeader()
+        
+        section(menuHeader("Agronomy Baseline")) {
+            String helpHtml = "<p><b>Global Crop Coefficient (Kc)</b><br>" +
+                "<i>Defines the transpiration profile of your primary vegetation. This multiplier scales the atmospheric evaporation rate to match your yard's specific biological needs. For example, Kentucky Bluegrass (KBG) maintained at a taller 3-inch height has more leaf surface area and transpires more water (higher Kc) than KBG cut to 1.5 inches.</i></p>" +
+                
+                "<div style='padding-bottom: 12px;'><table style='border-collapse: collapse; width: 100%; font-size: 13px; border: 1px solid #ccc; background-color: #f9f9f9;'>" +
+                "<tr style='background-color: #e0e0e0; border-bottom: 2px solid #ccc;'><th style='padding: 6px; text-align: left;'>Vegetation Type</th><th style='padding: 6px; text-align: left;'>Typical Kc</th></tr>" +
+                "<tr><td style='padding: 6px; border-bottom: 1px solid #ccc;'>Cool-Season Turf (KBG, Fescue, Rye) - Tall (3\"+)</td><td style='padding: 6px; border-bottom: 1px solid #ccc;'>0.85</td></tr>" +
+                "<tr><td style='padding: 6px; border-bottom: 1px solid #ccc;'>Cool-Season Turf (KBG, Fescue, Rye) - Short (1.5\")</td><td style='padding: 6px; border-bottom: 1px solid #ccc;'>0.75</td></tr>" +
+                "<tr><td style='padding: 6px; border-bottom: 1px solid #ccc;'>Warm-Season Turf (Bermuda, Zoysia, St. Augustine)</td><td style='padding: 6px; border-bottom: 1px solid #ccc;'>0.60 - 0.65</td></tr>" +
+                "<tr><td style='padding: 6px; border-bottom: 1px solid #ccc;'>Mixed Vegetable Garden</td><td style='padding: 6px; border-bottom: 1px solid #ccc;'>1.00 - 1.15</td></tr>" +
+                "<tr><td style='padding: 6px;'>Established Trees & Native Shrubs</td><td style='padding: 6px;'>0.50 - 0.60</td></tr>" +
+                "</table></div>" +
+                
+                "<div style='font-size: 12px; padding-bottom: 5px;'><b>Resources:</b> <a href='https://www.fao.org/3/X0490E/x0490e0b.htm' target='_blank'>FAO Irrigation Standard (Chapter 6)</a> | It is highly recommended to search your local University Agricultural Extension for region-specific data.</div>"
+
+            paragraph helpHtml
+            input "globalCropCoefficient", "decimal", title: "Set Crop Coefficient (Kc):", defaultValue: 0.8, range: "0.1..1.5", required: true, width: 6
+        }
+
+        section(menuHeader("Atmospheric Sensors")) {
+            String sensorHelp = "<p><i>Map individual devices for your weather telemetry. You may select the same multi-sensor device for multiple fields.</i></p>" +
+                "<div style='font-size: 13px; border-left: 3px solid #1A77C9; padding-left: 10px; margin-bottom: 15px;'>" +
+                "<b>Data Mapping Advice:</b><br>" +
+                "• <b>Wind Speed:</b> Select an averaged attribute (e.g., 10-minute average) rather than instantaneous gusts to prevent erratic evaporation spikes.<br>" +
+                "• <b>Rainfall:</b> Select a daily accumulation attribute (midnight-to-midnight) rather than a rain rate or sliding 24-hour total to ensure accurate daily bucket tracking." +
+                "</div>"
+            
+            paragraph sensorHelp
+            
+            // Temperature
+            input "etTempDevice", "capability.temperatureMeasurement", title: "Air Temperature Sensor", multiple: false, required: false, submitOnChange: true, width: 6
+            if (settings.etTempDevice) {
+                def tempAttrs = settings.etTempDevice.supportedAttributes.collect { it?.toString() }.toSet().sort()
+                input "attrTemperature", "enum", title: "Temperature Attribute", options: tempAttrs, defaultValue: "temperature", required: false, width: 6
+            }
+
+            // Humidity
+            input "etHumidDevice", "capability.relativeHumidityMeasurement", title: "Relative Humidity Sensor", multiple: false, required: false, submitOnChange: true, width: 6
+            if (settings.etHumidDevice) {
+                def humidAttrs = settings.etHumidDevice.supportedAttributes.collect { it?.toString() }.toSet().sort()
+                input "attrHumidity", "enum", title: "Humidity Attribute", options: humidAttrs, defaultValue: "humidity", required: false, width: 6
+            }
+
+            // Solar Radiation
+            input "etSolarDevice", "capability.illuminanceMeasurement", title: "Solar Radiation Sensor", multiple: false, required: false, submitOnChange: true, width: 6
+            if (settings.etSolarDevice) {
+                def solarAttrs = settings.etSolarDevice.supportedAttributes.collect { it?.toString() }.toSet().sort()
+                input "attrSolar", "enum", title: "Solar Attribute (e.g., illuminance/solarradiation)", options: solarAttrs, defaultValue: "illuminance", required: false, width: 6
+            }
+
+            // Wind Speed
+            input "etWindDevice", "capability.sensor", title: "Wind Speed Sensor", multiple: false, required: false, submitOnChange: true, width: 6
+            if (settings.etWindDevice) {
+                def windAttrs = settings.etWindDevice.supportedAttributes.collect { it?.toString() }.toSet().sort()
+                input "attrWind", "enum", title: "Wind Speed Attribute", options: windAttrs, required: false, width: 6
+            }
+            
+            // Rainfall
+            input "etRainGauge", "capability.sensor", title: "Rain Gauge", multiple: false, required: false, submitOnChange: true, width: 6
+            if (settings.etRainGauge) {
+                def rainAttrs = settings.etRainGauge.supportedAttributes.collect { it?.toString() }.toSet().sort()
+                input "attrRainAccumulation", "enum", title: "Daily Rain Attribute (e.g., dailyrainin)", options: rainAttrs, required: false, width: 6
+            }
+        
+            // Soil Temperature
+            input "etSoilProbe", "capability.temperatureMeasurement", title: "Soil Temperature Gauge", multiple: false, required: false, submitOnChange: true, width: 6
+            if (settings.etSoilProbe) {
+                def soilAttrs = settings.etSoilProbe.supportedAttributes.collect { it?.toString() }.toSet().sort()
+                input "attrSoilTemp", "enum", title: "Soil Temperature Attribute", options: soilAttrs, defaultValue: "temperature", required: false, width: 6
+            }
+        }
+    }
+}
 // -----------------------------------------------------------------------------
 // UI Rendering & Matrix Management
 // -----------------------------------------------------------------------------
+
+String getKcHelpHtml() {
+    if (!settings.etEnable) return ""
+    return "<details style='margin-bottom: 15px; cursor: pointer;'><summary><b><span style='color: #1A77C9;'>📚 Show Crop Coefficient (Kc) Reference Guide</span></b></summary>" +
+           "<div style='padding: 10px 0px;'><table style='border-collapse: collapse; width: 100%; font-size: 13px; border: 1px solid #ccc; background-color: #f9f9f9;'>" +
+           "<tr style='background-color: #e0e0e0; border-bottom: 2px solid #ccc;'><th style='padding: 6px; text-align: left;'>Vegetation Type</th><th style='padding: 6px; text-align: left;'>Typical Kc</th></tr>" +
+           "<tr><td style='padding: 6px; border-bottom: 1px solid #ccc;'>Cool-Season Turf (KBG, Fescue, Rye) - Tall (3\"+)</td><td style='padding: 6px; border-bottom: 1px solid #ccc;'>0.85</td></tr>" +
+           "<tr><td style='padding: 6px; border-bottom: 1px solid #ccc;'>Cool-Season Turf (KBG, Fescue, Rye) - Short (1.5\")</td><td style='padding: 6px; border-bottom: 1px solid #ccc;'>0.75</td></tr>" +
+           "<tr><td style='padding: 6px; border-bottom: 1px solid #ccc;'>Warm-Season Turf (Bermuda, Zoysia, St. Augustine)</td><td style='padding: 6px; border-bottom: 1px solid #ccc;'>0.60 - 0.65</td></tr>" +
+           "<tr><td style='padding: 6px; border-bottom: 1px solid #ccc;'>Mixed Vegetable Garden</td><td style='padding: 6px; border-bottom: 1px solid #ccc;'>1.00 - 1.15</td></tr>" +
+           "<tr><td style='padding: 6px;'>Established Trees & Native Shrubs</td><td style='padding: 6px;'>0.50 - 0.60</td></tr>" +
+           "</table></div></details>"
+}
 
 String displayDayGroups() {
     if (state.duraTimeBtn && settings.DuraTime != null) {
@@ -217,13 +324,15 @@ String displayDayGroups() {
 
     String tableHtml = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
     tableHtml += "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:8px 8px;text-align:center;font-size:12px} .tstat-col td {font-size:15px }" +
-        "</style><div style='overflow-x:auto'><table class='mdl-data-table tstat-col' style=';border:2px solid black'>" +
-        "<thead><tr style='border-bottom:2px solid black'>" +
+        "</style><div style='overflow-x:auto'><table class='mdl-data-table tstat-col' style=';border:2px solid black'>"
+        
+    String durationHeader = settings.etEnable ? "Max Duration" : "Duration"
+    tableHtml += "<thead><tr style='border-bottom:2px solid black'>" +
         "<th style='border-right:2px solid black'>Day Group</th>" +
         "<th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th><th>Sun</th>" +
         "<th style='color:red;'>Delete</th>" +
         "<th style='color:#db7321;'>OverTemp</th>" +
-        "<th>Start Time</th><th>Duration</th><th>Reset</th>" +
+        "<th>Start Time</th><th>$durationHeader</th><th>Reset</th>" +
         "</tr></thead><tr style='color:black'border = 1>" 
 
     String iconChecked = "<i class='he-checkbox-checked'></i>"
@@ -241,7 +350,6 @@ String displayDayGroups() {
             tableHtml += (groupData."$dayIndex") ? "<th>$buttonDayOn</th>" : "<th>$buttonDayOff</th>" 
         }
         
-        // Swapped proprietary Hubitat icon for guaranteed Iconify render
         String buttonRemoveGroup = buttonLink("rem$groupId", "<iconify-icon icon='mdi:trash-can-outline'></iconify-icon>", "red", "22px")
         tableHtml += "<th>$buttonRemoveGroup</th>"
         
@@ -266,6 +374,14 @@ String displayDayGroups() {
     return tableHtml
 }
 
+def displayDuration() {
+    if(state.duraTimeBtn) {
+        def targetIndex = state.duraTimeBtn.toString()
+        def savedDuration = state.dayGroup[targetIndex]?.duraTime
+        String inputTitle = settings.etEnable ? "Maximum Duration limit (minutes)" : "Sprinkler Duration (minutes)"
+        input "DuraTime", "decimal", title: inputTitle, submitOnChange: true, width: 4, range: "0..300", defaultValue: savedDuration, newLineAfter: true
+    }
+}
 def displayStartTime() {
     if(state.startTimeBtn) {
         def targetIndex = state.startTimeBtn.toString()
@@ -290,21 +406,18 @@ def displayStartTime() {
     }
 }
 
-def displayDuration() {
-    if(state.duraTimeBtn) {
-        def targetIndex = state.duraTimeBtn.toString()
-        def savedDuration = state.dayGroup[targetIndex]?.duraTime
-        input "DuraTime", "decimal", title: "Sprinkler Duration", submitOnChange: true, width: 4, range: "0..60", defaultValue: savedDuration, newLineAfter: true
-    }
-}
+
 
 String displayGrpSched() {
     String tableHtml = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
     tableHtml += "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:8px 8px;text-align:center;font-size:12px} .tstat-col td {font-size:15px }" +
-        "</style><div style='overflow-x:auto'><table class='mdl-data-table tstat-col' style=';border:2px solid black'>" +
-        "<thead><tr style='border-bottom:2px solid black'>" +
+        "</style><div style='overflow-x:auto'><table class='mdl-data-table tstat-col' style=';border:2px solid black'>"
+        
+    String etHeaders = settings.etEnable ? "<th>ET Mode</th><th>Crop Coeff (Kc)</th><th>App Rate (in/hr)</th>" : ""
+    tableHtml += "<thead><tr style='border-bottom:2px solid black'>" +
         "<th style='border-right:2px solid black'>Valve</th>" +
         "<th>Day Group</th>" +
+        etHeaders +
         "</tr></thead>"
 
     state.valves.keySet().findAll { deviceId -> !(deviceId in valves.id) }.each { orphanedId -> state.valves.remove(orphanedId) }
@@ -312,11 +425,83 @@ String displayGrpSched() {
         String deviceLinkHtml = "<a href='/device/edit/$hardwareDevice.id' target='_blank' title='Open Device Page for $hardwareDevice'>$hardwareDevice"
         String assignedGroups = state.valves[hardwareDevice.id].dayGroup.join(', ')
         String buttonGroupSelection = assignedGroups ? buttonLink("r$hardwareDevice.id", assignedGroups, "purple") : buttonLink("r$hardwareDevice.id", "Select", "green")
+        
+        String etCells = ""
+        if (settings.etEnable) {
+            def isEtActive = state.valves[hardwareDevice.id].containsKey('etMode') ? state.valves[hardwareDevice.id].etMode : true
+            String buttonEtMode = isEtActive ? buttonLink("e$hardwareDevice.id", "<iconify-icon icon='mdi:water-check'></iconify-icon> Smart", "green") : buttonLink("e$hardwareDevice.id", "<iconify-icon icon='mdi:water-minus'></iconify-icon> Static", "black")
+            
+            String buttonKc = "<i>Static</i>"
+            String buttonAppRate = "<i>Static</i>"
+            
+            if (isEtActive) {
+                def fallbackKc = settings.globalCropCoefficient != null ? settings.globalCropCoefficient : 0.8
+                def savedKc = state.valves[hardwareDevice.id]?.kc ?: fallbackKc
+                def savedAppRate = state.valves[hardwareDevice.id]?.appRate ?: "Set Rate"
+                
+                buttonKc = buttonLink("k$hardwareDevice.id", savedKc.toString(), "purple")
+                buttonAppRate = savedAppRate == "Set Rate" ? buttonLink("a$hardwareDevice.id", savedAppRate, "green") : buttonLink("a$hardwareDevice.id", savedAppRate.toString(), "purple")
+            }
+            
+            etCells = "<td title='Toggle ET Calculation'>$buttonEtMode</td><td title='Set Kc for ${hardwareDevice.displayName}'>$buttonKc</td><td title='Set App Rate for ${hardwareDevice.displayName}'>$buttonAppRate</td>"
+        }
+        
         tableHtml += "<tr style='color:black'><td style='border-right:2px solid black'>$deviceLinkHtml</td>" +
-            "<td title='${assignedGroups ? "Deselect $assignedGroups" : "Select String Hub Variable"}'>$buttonGroupSelection</td></tr>"
+            "<td title='${assignedGroups ? "Deselect $assignedGroups" : "Select Day Group"}'>$buttonGroupSelection</td>$etCells</tr>"
     }  
     tableHtml += "</table></div>"
     return tableHtml
+}
+
+def displayZoneKc() {
+    // 1. Intercept the page reload from hitting 'return'
+    if (state.kcBtn && settings.ZoneKc != null && settings.ZoneKc.toString() != "") {
+        def targetValveId = state.kcBtn.toString()
+        def clonedValves = state.valves.collectEntries { k, v -> [k, v.clone()] }
+        clonedValves[targetValveId].kc = settings.ZoneKc
+        state.valves = clonedValves
+        
+        state.remove("kcBtn")
+        app.removeSetting("ZoneKc")
+        return // Skip drawing the input box since we just saved it
+    }
+
+    // 2. Draw the input box if the button was clicked
+    if (state.kcBtn) {
+        def targetValveId = state.kcBtn.toString()
+        def hardwareSwitch = settings.valves?.find{it.id == targetValveId}
+        def valveName = hardwareSwitch?.label ?: hardwareSwitch?.name ?: "Unknown Valve"
+        def fallbackKc = settings.globalCropCoefficient != null ? settings.globalCropCoefficient : 0.8
+        def currentKc = state.valves[targetValveId]?.kc ?: fallbackKc
+
+        paragraph "<b>Set Crop Coefficient (Kc) for:</b> $valveName"
+        input "ZoneKc", "decimal", title: "Crop Coefficient (Kc) (Press Enter to Save)", submitOnChange: true, width: 4, range: "0.1..1.5", defaultValue: currentKc, newLineAfter: true
+    }
+}
+
+def displayZoneAppRate() {
+    // 1. Intercept the page reload from hitting 'return'
+    if (state.appRateBtn && settings.ZoneAppRate != null && settings.ZoneAppRate.toString() != "") {
+        def targetValveId = state.appRateBtn.toString()
+        def clonedValves = state.valves.collectEntries { k, v -> [k, v.clone()] }
+        clonedValves[targetValveId].appRate = settings.ZoneAppRate
+        state.valves = clonedValves
+        
+        state.remove("appRateBtn")
+        app.removeSetting("ZoneAppRate")
+        return // Skip drawing the input box since we just saved it
+    }
+
+    // 2. Draw the input box if the button was clicked
+    if (state.appRateBtn) {
+        def targetValveId = state.appRateBtn.toString()
+        def hardwareSwitch = settings.valves?.find{it.id == targetValveId}
+        def valveName = hardwareSwitch?.label ?: hardwareSwitch?.name ?: "Unknown Valve"
+        def currentAppRate = state.valves[targetValveId]?.appRate
+
+        paragraph "<b>Set Application Rate for:</b> $valveName"
+        input "ZoneAppRate", "decimal", title: "Application Rate (in/hr) (Press Enter to Save)", submitOnChange: true, width: 4, range: "0.1..10.0", defaultValue: currentAppRate, newLineAfter: true
+    }
 }
 
 def selectDayGroup() {
@@ -537,14 +722,29 @@ def init(reasonCode) {
             if(state.month2month == null) state.month2month = ["1":"100", "2":"100", "3":"100", "4":"100", "5":"100", "6":"100", "7":"100", "8":"100", "9":"100", "10":"100", "11":"100", "12":"100"]
             if(state.dayGroup == null) state.dayGroup = ['1': ['1':true, '2':true, '3':true, '4':true, '5':true, '6':true, '7':true, "s": "P", "name": "", "ot": false, "ra": false, "duraTime": null, "startTime": null ] ] 
             
-            valves?.each { hardwareDevice -> if(!state.valves["$hardwareDevice.id"]) { state.valves["$hardwareDevice.id"] = ['dayGroup':['1']] } } 
+            valves?.each { hardwareDevice -> if(!state.valves["$hardwareDevice.id"]) { state.valves["$hardwareDevice.id"] = ['dayGroup':['1'], 'etMode':true] } } 
             break; 
     }
 }
 
 void appButtonHandler(btnTrigger) {
+    // Intercept explicit saves before UI variables are wiped
+    if (btnTrigger == "DoneDayGroupBtn" && state.dayGrpBtn) {
+        def targetValveId = state.dayGrpBtn.toString()
+        def clonedValves = [:]
+        state.valves.each { k, v -> clonedValves[k] = v }
+        
+        def userSelections = settings.DayGroup ?: []
+        if (userSelections && !(userSelections instanceof List)) { userSelections = [userSelections] }
+        
+        clonedValves[targetValveId].dayGroup = userSelections
+        state.valves = clonedValves
+    }
+
     state.remove("dayGroupBtn")
     state.remove("dayGrpBtn")
+    state.remove("kcBtn")
+    state.remove("appRateBtn")
     state.remove("doneTime")
     state.remove("duraTimeBtn") 
     state.remove("eraseTime")
@@ -557,14 +757,27 @@ void appButtonHandler(btnTrigger) {
     app.removeSetting("StartAfter") 
     app.removeSetting("DuraTime")
     app.removeSetting("monthPercentage")
+    app.removeSetting("DayGroup")
+    app.removeSetting("ZoneKc")
+    app.removeSetting("ZoneAppRate")
 
-    if      ( btnTrigger == "btnSchEna")           toggleEnaSchBtn()
-    else if ( btnTrigger == "btnUsda")             getSoilTypeFromUSDA()
+	if (btnTrigger.startsWith("e")) {
+        def targetValveId = btnTrigger.minus("e")
+        def clonedValves = state.valves.collectEntries { k, v -> [k, v.clone()] }
+        def currentState = clonedValves[targetValveId].containsKey('etMode') ? clonedValves[targetValveId].etMode : true
+        clonedValves[targetValveId].etMode = !currentState
+        state.valves = clonedValves
+        return
+    }
+
+    if      ( btnTrigger == "btnSchEna")           toggleEnaSchBtn()    else if ( btnTrigger == "btnUsda")             getSoilTypeFromUSDA()
     else if ( btnTrigger == "addDGBtn")            addDayGroup()
     else if ( btnTrigger.startsWith("m")        )  state.dispMonthBtn = btnTrigger.minus("m")
     else if ( btnTrigger.startsWith("rem")      )  remDayGroup(btnTrigger.minus("rem")) 
     else if ( btnTrigger.startsWith("n")        )  state.duraTimeBtn = btnTrigger.minus("n")
     else if ( btnTrigger.startsWith("r")        )  state.dayGrpBtn = btnTrigger.minus("r")
+    else if ( btnTrigger.startsWith("k")        )  state.kcBtn = btnTrigger.minus("k")
+    else if ( btnTrigger.startsWith("a")        )  state.appRateBtn = btnTrigger.minus("a")
     else if ( btnTrigger.startsWith("t")        )  state.startTimeBtn = btnTrigger.minus("t")
     else if ( btnTrigger.startsWith("w")        )  state.dayGroupBtn = btnTrigger.minus("w")
     else if ( btnTrigger.startsWith("o")        )  state.overTempBtn = btnTrigger.minus("o")
