@@ -9,15 +9,15 @@ SprinklerSchedulePlus (Monolithic)
 -----------------------------------------------------------------------------
 This code is licensed as follows:
 
-	Portions:
-	 	Copyright (c) 2022 Hubitat, Inc.  All Rights Reserved Bruce Ravenel 
+    Portions:
+        Copyright (c) 2022 Hubitat, Inc.  All Rights Reserved Bruce Ravenel 
 
-	BSD 3-Clause License
-	
-	Copyright (c) 2026, J Haubold
-	Copyright (c) 2023, C Steele
-	Copyright (c) 2020, Matt Hammond
-	All rights reserved.
+    BSD 3-Clause License
+    
+    Copyright (c) 2026, J Haubold
+    Copyright (c) 2023, C Steele
+    Copyright (c) 2020, Matt Hammond
+    All rights reserved.
 -----------------------------------------------------------------------------
  * Version 2.1.0: added evapiortranspiration calculation module.  --in work.
  * Version 2.0.3: bug fixes
@@ -25,8 +25,12 @@ This code is licensed as follows:
  * Version 2.0.1: Monolithic architecture consolidation. Semantic variable standardization.
  */
 
+// Returns the current version string of the application.
 public static String version() { return "v2.0.2" }
 
+// -----------------------------------------------------------------------------
+// Application Definition
+// -----------------------------------------------------------------------------
 definition(
     name: "SprinklerSchedulePlus",
     namespace: "relifram",
@@ -39,13 +43,18 @@ definition(
     iconX2Url: ""
 )
 
+// -----------------------------------------------------------------------------
+// UI Preferences & Page Routing
+// -----------------------------------------------------------------------------
 preferences {
     page(name: "mainPage")
     page(name: "schedulePage")
     page(name: "environmentPage")
-	page(name: "etConfigPage")
+    page(name: "etConfigPage")
 }
 
+// Renders the primary landing page of the application, encompassing global toggles, 
+// hardware selection, page navigation, and the real-time system status matrix.
 def mainPage() {
     init(1) 
     dynamicPage(name: "mainPage", title: "", uninstall: true, install: true) {
@@ -67,6 +76,7 @@ def mainPage() {
             state.paused = schEnable ? false : true
             
             input "etEnable", "bool", title: "<b>Enable Smart Evapotranspiration (ET)?</b>", required: false, defaultValue: false, submitOnChange: true
+            input "passiveMode", "bool", title: "<b>Enable Passive/Test Mode?</b><br><i>(Calculates schedules and monitors external valve usage, but does NOT actuate relays)</i>", required: false, defaultValue: false, submitOnChange: true
 
             paragraph "\n<b>Switch Select</b>"
             input "valves",
@@ -81,15 +91,20 @@ def mainPage() {
             section(menuHeader("Configuration")) {
                 href "schedulePage", title: "Timetable Matrix", description: "Configure Day Groups, durations, and map switches.", state: "complete"
                 href "environmentPage", title: "Global Settings & Overrides", description: "Configure seasonal adjustments, rain holds, and temperature limits.", state: "complete"
-				if (settings.etEnable) {
+                if (settings.etEnable) {
                     href "etConfigPage", title: "Evapotranspiration (ET) Config", description: "Map local weather telemetry and crop coefficients.", state: "complete"
-                }            }
+                }            
+            }
 
             section(menuHeader("System Status")) {
-                def currentMonth = new Date().format("M") 	
+                def currentMonth = new Date().format("M")   
                 def seasonalMultiplier = state.month2month ? state.month2month[currentMonth].toDouble() : 1  
                  
-                String statusHtml = "<div style='background-color: rgba(73, 163, 125, 0.3);'>"	
+                String statusHtml = "<div style='background-color: rgba(73, 163, 125, 0.3);'>"  
+                
+                if (settings.passiveMode) {
+                    statusHtml += "<div style='background-color:#db7321; color:white; padding:5px; margin-bottom:10px;'><b>⚠️ SYSTEM IS IN PASSIVE MODE.</b> The scheduler will run a simulation, but physical valves will NOT be turned on.</div>"
+                }
                 
                 if (settings.etEnable) {
                     def lastRunDisplay = state.lastEtRunTime ? fixDateTimeString(state.lastEtRunTime) : "Pending Midnight"
@@ -99,7 +114,6 @@ def mainPage() {
                     "<b>Rain Hold:</b> ${state.rainHold ? '<span style=\"color:red;\">Active</span>' : 'Clear'}<br>" +
                     "<b>Soil Type:</b> ${state.defaultSoilType ?: 'Unknown'}<br>"
                     
-                    // Live Sensor Health Check
                     def currentTime = now()
                     def staleSensors = []
                     if (state.tempLastTime && ((currentTime - state.tempLastTime) / 1000.0) > 10800) staleSensors << "Temp"
@@ -114,29 +128,33 @@ def mainPage() {
                         statusHtml += "<b>Sensor Health:</b> <span style='color:green;'>All Nominal</span><br>"
                     }
                     
-                    // Zone-by-Zone Agronomy Ledger
                     statusHtml += "<br><b style='font-size:14px;'>Zone Agronomy Ledger</b>"
                     String zoneTableHtml = "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:6px; text-align:center; font-size:12px; border: 1px solid black; } .tstat-col th { background-color: #e0e0e0; font-weight: bold; }</style>"
                     zoneTableHtml += "<div style='overflow-x:auto; margin-top: 8px;'><table class='mdl-data-table tstat-col' style='width:100%; border-collapse: collapse; border:2px solid black'>"
                     zoneTableHtml += "<thead><tr><th>Zone</th><th>Mode</th><th>Kc</th><th>App Rate</th><th>Yesterday ET</th><th>Yesterday Rain</th><th>Today Applied</th><th>Net Deficit</th></tr></thead><tbody>"
 
-                    state.valves.each { valveId, valveData ->
-                        def hardwareSwitch = settings.valves?.find{it.id == valveId}
-                        def valveName = hardwareSwitch?.label ?: hardwareSwitch?.name ?: "Unknown"
+                    // Sort physical valves alphabetically, then build the table rows
+                    valves?.sort { (it.label ?: it.name).toLowerCase() }?.each { hardwareSwitch ->
+                        def valveId = hardwareSwitch.id.toString()
+                        def valveData = state.valves[valveId]
+                        
+                        if (valveData) {
+                            def valveName = hardwareSwitch.label ?: hardwareSwitch.name ?: "Unknown"
 
-                        def isEt = valveData.etMode ? "<span style='color:green'>Smart</span>" : "Static"
-                        def kc = valveData.kc ?: (settings.globalCropCoefficient ?: 0.8)
-                        def appRate = valveData.appRate ?: "Unset"
+                            def isEt = valveData.etMode ? "<span style='color:green'>Smart</span>" : "Static"
+                            def kc = valveData.kc ?: (settings.globalCropCoefficient ?: 0.8)
+                            def appRate = valveData.appRate ?: "Unset"
 
-                        def lastEt = valveData.lastET != null ? "${valveData.lastET.round(3)}\"" : "--"
-                        def lastRain = valveData.lastRain != null ? "${valveData.lastRain.round(3)}\"" : "--"
-                        def applied = valveData.todayApplied != null ? "${valveData.todayApplied.round(3)}\"" : "0.000\""
+                            def lastEt = valveData.lastET != null ? "${valveData.lastET.toDouble().round(3)}\"" : "--"
+                            def lastRain = valveData.lastRain != null ? "${valveData.lastRain.toDouble().round(3)}\"" : "--"
+                            def applied = valveData.todayApplied != null ? "${valveData.todayApplied.toDouble().round(3)}\"" : "0.000\""
 
-                        def deficit = state.zoneDeficits ? (state.zoneDeficits[valveId] ?: 0.0) : 0.0
-                        def deficitColor = deficit > 0.0 ? "red" : (deficit < 0.0 ? "blue" : "green")
-                        def deficitStr = "<span style='color:${deficitColor}; font-weight:bold;'>${deficit.round(3)}\"</span>"
+                            def deficit = state.zoneDeficits ? (state.zoneDeficits[valveId] ?: 0.0) : 0.0
+                            def deficitColor = deficit > 0.0 ? "red" : (deficit < 0.0 ? "blue" : "green")
+                            def deficitStr = "<span style='color:${deficitColor}; font-weight:bold;'>${deficit.toDouble().round(3)}\"</span>"
 
-                        zoneTableHtml += "<tr><td>${valveName}</td><td>${isEt}</td><td>${kc}</td><td>${appRate}</td><td>${lastEt}</td><td>${lastRain}</td><td>${applied}</td><td>${deficitStr}</td></tr>"
+                            zoneTableHtml += "<tr><td>${valveName}</td><td>${isEt}</td><td>${kc}</td><td>${appRate}</td><td>${lastEt}</td><td>${lastRain}</td><td>${applied}</td><td>${deficitStr}</td></tr>"
+                        }
                     }
                     zoneTableHtml += "</tbody></table></div><br>"
                     statusHtml += zoneTableHtml
@@ -158,27 +176,28 @@ def mainPage() {
                 statusHtml += valves?.collect { device -> "<b>${device.label ?: device.name}</b> is ${device.currentValue('switch') == 'on' ? 'On' : 'Off'}"}?.join(', ') ?: ""
                 statusHtml += "</div>"
                 paragraph statusHtml
-           
-				section(menuHeader("System Logging")) {
-				input "infoEnable", "bool", title: "Enable activity logging", required: false, defaultValue: true, width: 2
-				input "debugEnable", "bool", title: "Enable debug logging", required: false, defaultValue: false, submitOnChange: true, width: 3
+            
+                section(menuHeader("System Logging")) {
+                input "infoEnable", "bool", title: "Enable activity logging", required: false, defaultValue: true, width: 2
+                input "debugEnable", "bool", title: "Enable debug logging", required: false, defaultValue: false, submitOnChange: true, width: 3
 
-					if (debugEnable) {
-						input "debugTimeout", "enum", required: false, defaultValue: "0", title: "Automatic debug Log Disable Timeout?", width: 3,  \
-								options: [ "0":"None", "1800":"30 Minutes", "3600":"60 Minutes", "86400":"1 Day" ]
-					}
-				}
-			}
+                    if (debugEnable) {
+                        input "debugTimeout", "enum", required: false, defaultValue: "0", title: "Automatic debug Log Disable Timeout?", width: 3,  \
+                                options: [ "0":"None", "1800":"30 Minutes", "3600":"60 Minutes", "86400":"1 Day" ]
+                    }
+                }
+            }
         }
     }
 }
 
+// Renders the Schedule Matrix, Day Groups, and Hardware switch assignments
 def schedulePage() {
     dynamicPage(name: "schedulePage", title: "Schedule Matrix", uninstall: false, install: false) {
         displayHeader()
         section(menuHeader("Schedule Matrix")) {
             paragraph "<b>Select Days into Groups</b>"
-            paragraph displayDayGroups()		
+            paragraph displayDayGroups()        
             displayDuration()
             displayStartTime()
 
@@ -186,17 +205,19 @@ def schedulePage() {
             paragraph switchHeaderText
             paragraph getKcHelpHtml()
             
-            paragraph displayGrpSched()		
+            paragraph displayGrpSched()     
             selectDayGroup()
-            // Render individual inputs below the matrix
+            
+            // Render individual ET mapping inputs below the matrix
             displayZoneKc()
             displayZoneAppRate()
-			
+            
             paragraph "\n<hr style='background-color:#1A77C9; height: 1px; border: 0;'></hr>"
         }
     }
 }
 
+// Renders the Global Overrides page: Seasonality percentages, temperature lockouts, rain holds, and site location profiling
 def environmentPage() {
     dynamicPage(name: "environmentPage", title: "Global Overrides & Logging", uninstall: false, install: false) {
         displayHeader()
@@ -208,7 +229,7 @@ def environmentPage() {
             
             paragraph "\n<b>Agronomy Site Data (Information Only)</b>"
             
-			int elevationFeet = state.elevationMeters ? Math.round(state.elevationMeters * 3.28084) : 0
+            int elevationFeet = state.elevationMeters ? (state.elevationMeters.toDouble() * 3.28084).toInteger() : 0
             paragraph "Site Elevation: <b>${state.elevationMeters ? state.elevationMeters + ' m / ' + elevationFeet + ' ft' : 'Unknown'}</b>"
             input "btnElevation", "button", title: "Fetch Global Elevation", width: 3, submitOnChange: true
 
@@ -218,6 +239,7 @@ def environmentPage() {
     }
 }
 
+// Renders the ET Telemetry mapping page, allowing users to align Hubitat hardware attributes with mathematical inputs
 def etConfigPage() {
     dynamicPage(name: "etConfigPage", title: "Evapotranspiration (ET) Telemetry", uninstall: false, install: false) {
         displayHeader()
@@ -303,10 +325,12 @@ def etConfigPage() {
         }
     }
 }
+
 // -----------------------------------------------------------------------------
 // UI Rendering & Matrix Management
 // -----------------------------------------------------------------------------
 
+// Returns HTML to display a collapsible reference table for standard Crop Coefficients.
 String getKcHelpHtml() {
     if (!settings.etEnable) return ""
     return "<details style='margin-bottom: 15px; cursor: pointer;'><summary><b><span style='color: #1A77C9;'>📚 Show Crop Coefficient (Kc) Reference Guide</span></b></summary>" +
@@ -320,6 +344,8 @@ String getKcHelpHtml() {
            "</table></div></details>"
 }
 
+// Renders the primary Schedule Matrix table, including day selection, start times, and durations.
+// Captures UI button presses to update the internal state arrays before drawing the updated HTML.
 String displayDayGroups() {
     if (state.duraTimeBtn && settings.DuraTime != null) {
         def targetIndex = state.duraTimeBtn.toString()
@@ -433,6 +459,7 @@ String displayDayGroups() {
     return tableHtml
 }
 
+// Presents the duration input box dynamically when a user clicks a duration cell in the matrix
 def displayDuration() {
     if(state.duraTimeBtn) {
         def targetIndex = state.duraTimeBtn.toString()
@@ -441,6 +468,8 @@ def displayDuration() {
         input "DuraTime", "decimal", title: inputTitle, submitOnChange: true, width: 4, range: "0..300", defaultValue: savedDuration, newLineAfter: true
     }
 }
+
+// Presents the start time input box (Time or Chained Group mode) dynamically
 def displayStartTime() {
     if(state.startTimeBtn) {
         def targetIndex = state.startTimeBtn.toString()
@@ -466,7 +495,7 @@ def displayStartTime() {
 }
 
 
-
+// Renders the secondary HTML table mapping hardware valves to Day Groups, ET Modes, and App Rates
 String displayGrpSched() {
     String tableHtml = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
     tableHtml += "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:8px 8px;text-align:center;font-size:12px} .tstat-col td {font-size:15px }" +
@@ -479,7 +508,9 @@ String displayGrpSched() {
         etHeaders +
         "</tr></thead>"
 
+    // Clean up orphaned switch IDs if a device was removed from the general settings
     state.valves.keySet().findAll { deviceId -> !(deviceId in valves.id) }.each { orphanedId -> state.valves.remove(orphanedId) }
+    
     valves?.sort{it.displayName.toLowerCase()}.each { hardwareDevice ->
         String deviceLinkHtml = "<a href='/device/edit/$hardwareDevice.id' target='_blank' title='Open Device Page for $hardwareDevice'>$hardwareDevice"
         String assignedGroups = state.valves[hardwareDevice.id].dayGroup.join(', ')
@@ -512,8 +543,9 @@ String displayGrpSched() {
     return tableHtml
 }
 
+// Handles user input for zone-specific Crop Coefficients (Kc)
 def displayZoneKc() {
-    // 1. Intercept the page reload from hitting 'return'
+    // Intercept the page reload from hitting 'return'
     if (state.kcBtn && settings.ZoneKc != null && settings.ZoneKc.toString() != "") {
         def targetValveId = state.kcBtn.toString()
         def clonedValves = state.valves.collectEntries { k, v -> [k, v.clone()] }
@@ -525,7 +557,7 @@ def displayZoneKc() {
         return // Skip drawing the input box since we just saved it
     }
 
-    // 2. Draw the input box if the button was clicked
+    // Draw the input box if the button was clicked
     if (state.kcBtn) {
         def targetValveId = state.kcBtn.toString()
         def hardwareSwitch = settings.valves?.find{it.id == targetValveId}
@@ -538,8 +570,9 @@ def displayZoneKc() {
     }
 }
 
+// Handles user input for physical hardware application rates (inches/hour)
 def displayZoneAppRate() {
-    // 1. Intercept the page reload from hitting 'return'
+    // Intercept the page reload from hitting 'return'
     if (state.appRateBtn && settings.ZoneAppRate != null && settings.ZoneAppRate.toString() != "") {
         def targetValveId = state.appRateBtn.toString()
         def clonedValves = state.valves.collectEntries { k, v -> [k, v.clone()] }
@@ -551,7 +584,7 @@ def displayZoneAppRate() {
         return // Skip drawing the input box since we just saved it
     }
 
-    // 2. Draw the input box if the button was clicked
+    // Draw the input box if the button was clicked
     if (state.appRateBtn) {
         def targetValveId = state.appRateBtn.toString()
         def hardwareSwitch = settings.valves?.find{it.id == targetValveId}
@@ -563,6 +596,7 @@ def displayZoneAppRate() {
     }
 }
 
+// Provides the multi-select input dropdown to map a valve to one or more Day Groups
 def selectDayGroup() {
     if(state.dayGrpBtn) {
         List availableGroups = state.dayGroup.keySet().collect() 
@@ -579,6 +613,7 @@ def selectDayGroup() {
     }
 }
 
+// Appends a new, blank Day Group row to the Schedule Matrix
 def addDayGroup(eventTrigger = null) {
     def templateMap = [ '1': false, '2': false, '3': false, '4': false, '5': false, '6': false, '7': false, "s": "P", "name": "", "ot": false, "ra": false, "duraTime": null, "startTime": null ]
     
@@ -592,6 +627,7 @@ def addDayGroup(eventTrigger = null) {
     state.dayGroup = clonedGroups
 }
 
+// Deletes a specific Day Group and explicitly repairs any sequential chaining or valve assignments 
 def remDayGroup(eventTrigger = null) {
     if (state.dayGroup.size() > 1) {
         def targetGroupId = eventTrigger.toString()
@@ -647,11 +683,11 @@ def remDayGroup(eventTrigger = null) {
     }
 }
 
-
 // -----------------------------------------------------------------------------
 // Global Variable Rendering & Processing
 // -----------------------------------------------------------------------------
 
+// Renders the static multiplier table for passive seasonal duration adjustments (non-ET mode)
 String displayMonths() {
     String tableHtml = "<i>Assume that Valve Duration is 100% and adjust that timing by these percentages, monthly. Valve Duration is reduced to the percentage defined for the month in which it runs. (20 seconds is the valve's minimum duration.) </i><p>"
     tableHtml += "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:8px 8px;text-align:center;font-size:12px} .tstat-col td {font-size:15px }" +
@@ -666,6 +702,7 @@ String displayMonths() {
     return tableHtml
 }
 
+// Handles user updates for the seasonal multiplier values
 def editMonths() {
     if (state.dispMonthBtn) {
         input "monthPercentage", "decimal", title: "Monthly Percentage", submitOnChange: true, width: 4, range: "1..100", defaultValue: state.month2month[state.dispMonthBtn]
@@ -678,12 +715,14 @@ def editMonths() {
     }
 }
 
+// Configuration block to assign an outdoor temperature device and set maximum heat thresholds
 def selectTemperatureDevice() {
     paragraph "\n<b>Overtemperature Sensor</b>"
     input "outdoorTempDevice", "capability.temperatureMeasurement", title: "Select which device?", multiple: false, required: false, submitOnChange: true
     input "maxOutdoorTemp", "number", title: "<i>Enter the Maximum temperature, beyond which, conditional Timetables will be invoked.</i>", defaultValue: maxOutdoorTemp, multiple: false, required: false, submitOnChange: true
 }
 
+// Configuration block for assigning a hardware rain gauge or wet/dry sensor for global schedule holds
 def selectRainDevice() {
     paragraph "\n<b>Rain Device Selection</b>\nThis device simply pauses any irrigation activity. It continues to operate even if ET is enabled.\nIt can be an on/off switch or a wet/dry device."
     input "rainDeviceOutdoor", "capability.waterSensor", title: "Select Irrigaion  Sensor", multiple: false, required: false, submitOnChange: true
@@ -691,24 +730,27 @@ def selectRainDevice() {
     if (settings.rainDeviceOutdoor) {
         def deviceAttributes = [:]
         def attributeCounter = 1
-        // Simplified attribute collection for a single device object
+        // Extracts and lists all supported attributes from the selected device to map the "wet" state
         def attributeList = settings.rainDeviceOutdoor.supportedAttributes.collect { it?.toString()?.toLowerCase() }?.toSet()?.sort()
         
         attributeList.each { attributeString -> deviceAttributes[attributeCounter++] = "$attributeString" }
         input "selectRainAttribute", "enum", options: deviceAttributes, title: "<i>Which Attribute indicates there was enough rain to skip a cycle?</i>", defaultValue: settings.selectRainAttribute, multiple: false, required: false, submitOnChange: true
         state.currentRainAttribute = deviceAttributes[settings.selectRainAttribute as Integer]
-    }	
+    }   
 }
 
 // -----------------------------------------------------------------------------
 // Core System Utilities & Hubitat Events
 // -----------------------------------------------------------------------------
 
+// Hubitat lifecycle event called when the application is first installed
 def installed() {
     logInfo {"Installed with settings."}
     initialize()
 }
 
+// Hubitat lifecycle event called whenever the user clicks 'Done' or a setting changes in the UI.
+// Completely resets the scheduling engine, rebuilds telemetry subscriptions, and validates state.
 def updated() {
     logDebug {"updated()"}
     unschedule()
@@ -716,6 +758,7 @@ def updated() {
     
     unsubscribe()
     
+    // Overtemperature routing setup
     if (outdoorTempDevice) { 
         subscribe(outdoorTempDevice, "temperature", "recvOutdoorTempHandler") 
         
@@ -739,10 +782,11 @@ def updated() {
         state.overTempToday = false
     }
     
+    // External Rain Hold routing setup
     state.rainDeviceData = [:]
     def rainAttributeString = state.currentRainAttribute?.toString()
 
-if (settings.rainDeviceOutdoor && rainAttributeString) {
+    if (settings.rainDeviceOutdoor && rainAttributeString) {
         def sensorDevice = settings.rainDeviceOutdoor
         def sensorName = sensorDevice.label ?: sensorDevice.name
         def sensorId = sensorDevice.id.toString()
@@ -757,7 +801,7 @@ if (settings.rainDeviceOutdoor && rainAttributeString) {
         state.rainHold = false
     }
     
-    // Schedule the daily math engine to fire at 11:55 PM
+    // Schedule the daily ET mathematical engine to fire at 11:55 PM
     if (settings.etEnable) {
         schedule('0 55 23 ? * *', "calculateET")
     } else {
@@ -765,6 +809,7 @@ if (settings.rainDeviceOutdoor && rainAttributeString) {
     }
     
     // --- Valve Application Monitoring ---
+    // Subscribes to the valves to monitor physical on/off duration, enabling passive deficit tracking
     if (state.zoneDeficits == null) state.zoneDeficits = [:]
     unsubscribe("valveSwitchHandler")
     valves?.each { hardwareValve -> 
@@ -772,6 +817,7 @@ if (settings.rainDeviceOutdoor && rainAttributeString) {
     }
     
     // --- ET Telemetry Subscriptions & Initialization ---
+    // Establishes the real-time listening hooks for the running accumulators
     if (settings.etEnable) {
         def bootTime = now()
         if (state.solarMJ == null) state.solarMJ = 0.0
@@ -816,8 +862,10 @@ if (settings.rainDeviceOutdoor && rainAttributeString) {
     scheduleNext()
 }
 
+// Optional lifecycle hook, explicitly left blank as the initialization logic is handled in init()
 def initialize() { }
 
+// Core initialization hook to build out fundamental state variables if they are missing
 def init(reasonCode) {
     switch(reasonCode) {            
         case 1: 
@@ -841,6 +889,8 @@ def init(reasonCode) {
     }
 }
 
+// Hubitat UI method interceptor: Captures button presses from the dynamic pages and routes them
+// to the appropriate logic block while cleaning up temporary UI variables to prevent layout errors.
 void appButtonHandler(btnTrigger) {
     // Intercept explicit saves before UI variables are wiped
     if (btnTrigger == "DoneDayGroupBtn" && state.dayGrpBtn) {
@@ -875,7 +925,7 @@ void appButtonHandler(btnTrigger) {
     app.removeSetting("ZoneKc")
     app.removeSetting("ZoneAppRate")
 
-	if (btnTrigger.startsWith("e")) {
+    if (btnTrigger.startsWith("e")) {
         def targetValveId = btnTrigger.minus("e")
         def clonedValves = state.valves.collectEntries { k, v -> [k, v.clone()] }
         def currentState = clonedValves[targetValveId].containsKey('etMode') ? clonedValves[targetValveId].etMode : true
@@ -904,6 +954,7 @@ void appButtonHandler(btnTrigger) {
 // Schedule Execution Logic
 // -----------------------------------------------------------------------------
 
+// Cleans up daily variables and sets a midnight true-up trigger to plan the next day's runs
 def reschedule() {
     unschedule(reschedule)
     schedule('7 7 0 ? * *', reschedule) 
@@ -912,6 +963,7 @@ def reschedule() {
     runIn(15, scheduleNext)
 }
 
+// Evaluates the matrix, checks for valid watering days, and queues the next execution event
 def scheduleNext() {
     String appLabel = app.label
     if (app.label.contains('<span ')) { appLabel = app.label.substring(0, app.label.indexOf('<span ')) }
@@ -938,7 +990,7 @@ def scheduleNext() {
     if (!schEnable) { logWarn {"Schedule Paused for $appLabel."}; return }
     if (state.rainHold) { logWarn {"Rain Hold possible for $appLabel Today."} }
     
-	Date currentDate = new Date()
+    Date currentDate = new Date()
     String formattedTimeNow = currentDate.format("HH:mm")
     def hasValidSchedule = false
     def startHour, startMinute, targetGroupId
@@ -961,6 +1013,7 @@ def scheduleNext() {
     }
 }
 
+// Triggers the initial watering sequence for a specific Day Group and activates the first physical valve
 def schedHandler(payloadData) {
     unschedule(schedHandler)
     String appLabel = app.label
@@ -979,7 +1032,7 @@ def schedHandler(payloadData) {
     if (baseDurationMinutes == 0) {
         logInfo {"Duration of 0, skipping."}
         runIn(60, scheduleNext)
-        return	
+        return  
     }
 
     if (state.rainHold) { 
@@ -1000,15 +1053,20 @@ def schedHandler(payloadData) {
     if (activeSwitchId != null) { pendingSwitches = pendingSwitches.tail() }
 
     def hardwareSwitch = settings.valves?.find{it.id == "$activeSwitchId"}
-    hardwareSwitch?.on()
-    logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} on."}
+    
+    if (settings.passiveMode) {
+        logInfo {"PASSIVE MODE: Bypassing ON command for ${hardwareSwitch?.label ?: hardwareSwitch?.name}."}
+    } else {
+        hardwareSwitch?.on()
+        logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} on."}
+    }
     
     state.inCycle = true
     atomicState.cycleStart = now()
     updateMyLabel(3)
 
     baseDurationMinutes = state.dayGroup."$activeGroupId".duraTime
-    def currentMonthInteger = new Date().format("M") 	
+    def currentMonthInteger = new Date().format("M")    
     def seasonalMultiplier = state.month2month ? state.month2month[currentMonthInteger].toDouble() / 100 : 1  
     def calculatedDurationSeconds = 60 * baseDurationMinutes * seasonalMultiplier
     def safeDurationSeconds = Math.max(calculatedDurationSeconds.toInteger(), 20) 
@@ -1017,6 +1075,8 @@ def schedHandler(payloadData) {
     runIn(safeDurationSeconds, scheduleDurationHandler, [data: [activeSwitchId: "$activeSwitchId", durationSeconds: "$safeDurationSeconds", pendingSwitches: "$pendingSwitches", targetGroupId: "$activeGroupId"]]) 
 }
 
+// Executes when a valve completes its runtime: shuts the active valve off and recurses to the next switch in the group.
+// Once a group completes, it checks for dependent/cascaded groups.
 def scheduleDurationHandler(payloadData) {
     unschedule(scheduleDurationHandler)
     String activeSwitchId = payloadData.activeSwitchId as String
@@ -1026,8 +1086,13 @@ def scheduleDurationHandler(payloadData) {
     logDebug {"schedDurHandler: stopping switch $activeSwitchId, next queue: $pendingSwitches"}
 
     def hardwareSwitch = settings.valves?.find{it.id == "$activeSwitchId"}
-    hardwareSwitch?.off()
-    logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} off."}
+    
+    if (settings.passiveMode) {
+        logInfo {"PASSIVE MODE: Bypassing OFF command for ${hardwareSwitch?.label ?: hardwareSwitch?.name}."}
+    } else {
+        hardwareSwitch?.off()
+        logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} off."}
+    }
 
     pauseExecution(20000)
     
@@ -1046,8 +1111,14 @@ def scheduleDurationHandler(payloadData) {
         if (nextSwitchId != null) {
             pendingSwitches = pendingSwitches.tail()
             hardwareSwitch = settings.valves?.find{it.id == "$nextSwitchId"}
-            hardwareSwitch?.on()
-            logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} on."}
+            
+            if (settings.passiveMode) {
+                logInfo {"PASSIVE MODE: Bypassing ON command for ${hardwareSwitch?.label ?: hardwareSwitch?.name}."}
+            } else {
+                hardwareSwitch?.on()
+                logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} on."}
+            }
+            
             runIn(safeDurationSeconds, scheduleDurationHandler, [data: [activeSwitchId: "$nextSwitchId", durationSeconds: "$safeDurationSeconds", pendingSwitches: "$pendingSwitches", targetGroupId: "$activeGroupId"]])
         }
     } else {
@@ -1072,21 +1143,23 @@ def scheduleDurationHandler(payloadData) {
     }
 }
 
+// Queries the UI state and generates a sorted array of chronological execution events for the current day
 def buildTimings(cronDayIndex) {
     Map cronWeekTranslation = [1:'7', 2:'1', 3:'2', 4:'3', 5:'4', 6:'5', 7:'6']
     def scheduledGroupKeys = state.dayGroup.findAll { groupId, groupData -> groupData[cronWeekTranslation[cronDayIndex]] == true }.keySet()
     return scheduledGroupKeys.collect { groupId -> [key: groupId, duraTime: state.dayGroup[groupId]?.duraTime, startTime: state.dayGroup[groupId]?.startTime]}.findAll { it.startTime != null }.sort { it.startTime.startsWith("after_") ? "99:99" : it.startTime } 
 }
-	
-// --- ET Telemetry Subscriptions & Initialization ---
+
 // -----------------------------------------------------------------------------
 // Sensor Callbacks & API Methods
 // -----------------------------------------------------------------------------
+
+// Passive application monitor. Measures exact on-time of physical hardware (regardless of what triggered it)
+// to deduct actual applied water from the zone deficit ledger.
 def valveSwitchHandler(hardwareEvent) {
     def valveId = hardwareEvent.deviceId.toString()
     def valveData = state.valves[valveId]
     
-    // Ignore valves that aren't configured for ET tracking
     if (!valveData || valveData.etMode == false) return 
 
     if (hardwareEvent.value == "on") {
@@ -1103,17 +1176,15 @@ def valveSwitchHandler(hardwareEvent) {
             if (appRate > 0.0) {
                 def inchesApplied = durationHours * appRate
                 
-                // Subtract the applied water from the zone's deficit
                 def currentDeficit = state.zoneDeficits[valveId] ?: 0.0
                 def newDeficit = currentDeficit - inchesApplied
                 
-                // Field Capacity Cap: Prevent the ledger from infinitely tracking surplus overwatering
                 if (newDeficit < -0.1) newDeficit = -0.1 
                 
                 state.zoneDeficits[valveId] = newDeficit
                 valveData.todayApplied = (valveData.todayApplied ?: 0.0) + inchesApplied
                 
-                logInfo {"Monitor: Valve ${hardwareEvent.displayName} closed. Applied ${inchesApplied.round(3)}\" over ${Math.round(durationMs/60000)} mins. New Deficit: ${newDeficit.round(3)}\""}
+                logInfo {"Monitor: Valve ${hardwareEvent.displayName} closed. Applied ${inchesApplied.toDouble().round(3)}\" over ${(durationMs/60000).toInteger()} mins. New Deficit: ${newDeficit.toDouble().round(3)}\""}
             } else {
                 logWarn {"Monitor: Valve ${hardwareEvent.displayName} ran, but no Application Rate is configured. Cannot calculate water volume."}
             }
@@ -1123,7 +1194,10 @@ def valveSwitchHandler(hardwareEvent) {
 }
 
 // --- ET Telemetry Accumulators (Time-Weighted) ---
+// The following 5 methods handle asynchronous telemetry events from hardware sensors.
+// They use an incremental Riemann Sum to perfectly average (or integrate) high-frequency data without array bloat.
 
+// Incremental accumulator for Temperature
 def etTempHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def val = new BigDecimal(hardwareEvent.value)
@@ -1131,7 +1205,7 @@ def etTempHandler(hardwareEvent) {
 
     if (state.tempLastTime) {
         def deltaSeconds = (currentTime - state.tempLastTime) / 1000.0
-        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: Air Temperature was offline/inactive for ${Math.round(deltaSeconds/60)} minutes."}
+        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: Air Temperature was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."}
         
         def lastVal = state.tempLastValue ?: val
         state.tempSum = (state.tempSum ?: 0.0) + (lastVal * deltaSeconds)
@@ -1148,7 +1222,7 @@ def etVpdHandler(hardwareEvent) {
 
     if (state.vpdLastTime) {
         def deltaSeconds = (currentTime - state.vpdLastTime) / 1000.0
-        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: VPD Sensor was offline/inactive for ${Math.round(deltaSeconds/60)} minutes."}
+        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: VPD Sensor was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."}
         
         def lastVal = state.vpdLastValue ?: val
         state.vpdSum = (state.vpdSum ?: 0.0) + (lastVal * deltaSeconds)
@@ -1165,7 +1239,7 @@ def etHumidHandler(hardwareEvent) {
 
     if (state.humidLastTime) {
         def deltaSeconds = (currentTime - state.humidLastTime) / 1000.0
-        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: Humidity Sensor was offline/inactive for ${Math.round(deltaSeconds/60)} minutes."}
+        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: Humidity Sensor was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."}
         
         def lastVal = state.humidLastValue ?: val
         state.humidSum = (state.humidSum ?: 0.0) + (lastVal * deltaSeconds)
@@ -1182,7 +1256,7 @@ def etWindHandler(hardwareEvent) {
 
     if (state.windLastTime) {
         def deltaSeconds = (currentTime - state.windLastTime) / 1000.0
-        if (deltaSeconds > 14400) logWarn {"Stale Sensor Warning: Wind Sensor was offline/inactive for ${Math.round(deltaSeconds/60)} minutes."} // Slightly longer tolerance for wind calms
+        if (deltaSeconds > 14400) logWarn {"Stale Sensor Warning: Wind Sensor was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."}
         
         def lastVal = state.windLastValue ?: val
         state.windSum = (state.windSum ?: 0.0) + (lastVal * deltaSeconds)
@@ -1199,7 +1273,7 @@ def etSolarHandler(hardwareEvent) {
 
     if (state.solarLastTime) {
         def deltaSeconds = (currentTime - state.solarLastTime) / 1000.0
-        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: Solar Radiation was offline/inactive for ${Math.round(deltaSeconds/60)} minutes."}
+        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: Solar Radiation was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."}
         
         def lastValWatts = state.solarLastValue ?: valWatts
         def sliceMJ = (lastValWatts * deltaSeconds) / 1000000.0
@@ -1210,12 +1284,14 @@ def etSolarHandler(hardwareEvent) {
     state.solarLastValue = valWatts
 }
 
+// Extracts the maximum daily rain accumulation from a sliding bucket sensor
 def etRainHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def valRain = new BigDecimal(hardwareEvent.value)
     state.dailyRain = valRain
 }
 
+// Captures temperature spikes to unlatch specific conditional OverTemperature schedules
 def recvOutdoorTempHandler(hardwareEvent) {
     def currentTempString = hardwareEvent?.value?.toString()
     def configuredMaxTemp = settings.maxOutdoorTemp?.toString()
@@ -1229,8 +1305,6 @@ def recvOutdoorTempHandler(hardwareEvent) {
         }
     }
     
-    //logDebug {"OutdoorTemp Event Received - Ambient: ${currentTempString}°, Max Limit: ${configuredMaxTemp}°. Current Latch State: ${state.overTempToday}"}
-
     if (!state.overTempToday) { 
         if (currentTempString?.isNumber() && configuredMaxTemp?.isNumber()) {
             state.overTempToday = new BigDecimal(currentTempString) > new BigDecimal(configuredMaxTemp) 
@@ -1243,6 +1317,7 @@ def recvOutdoorTempHandler(hardwareEvent) {
     }
 }
 
+// Toggles a global stop/hold variable to immediately halt valve execution if hardware senses 'wet'
 def recvOutdoorRainHandler(hardwareEvent) {
     def eventDeviceId = hardwareEvent?.deviceId?.toString()
     def configuredSensorId = settings.rainDeviceOutdoor?.id?.toString()
@@ -1257,6 +1332,7 @@ def recvOutdoorRainHandler(hardwareEvent) {
     }
 }
 
+// Triggered via UI button. Coordinates mapping standard Hubitat coordinates to retrieve global elevation
 def fetchElevationData() {
     state.geo = state.geo ?: [:]
     if(state.geo.lat == null || state.geo.lon == null) {
@@ -1273,6 +1349,7 @@ def fetchElevationData() {
     getElevationFromAPI(state.geo.lat, state.geo.lon)
 }
 
+// Initiates an HTTP GET request to the Open-Meteo external DEM layer for precise altitude
 def getElevationFromAPI(geoLat, geoLon) {
     // Queries the Open-Meteo global digital elevation model (DEM)
     def endpoint = "https://api.open-meteo.com/v1/elevation?latitude=${geoLat}&longitude=${geoLon}"
@@ -1296,6 +1373,9 @@ def getElevationFromAPI(geoLat, geoLon) {
         logWarn {"getElevationFromAPI() execution error: ${exception.message}"} 
     }
 }
+
+// Pre-calculation logic. Triggers exactly at midnight to artificially close the asynchronous sensor gaps 
+// and zero-out the arrays, preventing temporal overlap between consecutive days.
 def closeOutDailyAccumulators() {
     def boundaryTime = now()
     def dailyMeans = [:]
@@ -1340,10 +1420,11 @@ def closeOutDailyAccumulators() {
     return dailyMeans
 }
 
+// Primary ASCE Penman-Monteith math execution engine. Converts inputs to strict metric variables, determines
+// specific thermodynamic constants based on hardware availability, and deposits raw volume loss to the zone ledgers.
 def calculateET() {
     logDebug {"--- Starting Daily ET Calculation ---"}
     
-    // 1. Close out the accumulators and extract the 24-hour true means
     def dailyData = closeOutDailyAccumulators()
     logDebug {"Accumulator Data Closed: ${dailyData}"}
 
@@ -1354,56 +1435,46 @@ def calculateET() {
     def humidPct = dailyData.humid
     def rainIn = dailyData.rain
 
-    // Hard stop if primary telemetry is missing
     if (tempF == null || windMph == null || solarMJ == null) {
         logWarn {"calculateET: Missing core telemetry (Temp, Wind, or Solar). ET calculation aborted for today."}
         return
     }
 
-    // 2. Unit Conversions to strictly Metric
     def tempC = (tempF.toDouble() - 32.0) * (5.0 / 9.0)
     def windMs = windMph.toDouble() * 0.44704
-    logDebug {"Converted Baseline - Temp: ${tempC.round(2)}°C, Wind: ${windMs.round(2)} m/s"}
+    logDebug {"Converted Baseline - Temp: ${tempC.toDouble().round(2)}°C, Wind: ${windMs.toDouble().round(2)} m/s"}
 
-    // 3. Vapor Pressure Deficit (ed) Routing
     def ed = 0.0
     if (vpdKpa != null) {
         ed = vpdKpa.toDouble()
-        logDebug {"VPD Source: Native Hardware Vapor Pressure Deficit (${ed.round(3)} kPa)"}
+        logDebug {"VPD Source: Native Hardware Vapor Pressure Deficit (${ed.toDouble().round(3)} kPa)"}
     } else if (humidPct != null) {
-        // Fallback: Calculate es and ea from temperature and relative humidity
         def es = 0.6108 * Math.exp((17.27 * tempC) / (tempC + 237.3))
         def ea = es * (humidPct.toDouble() / 100.0)
         ed = es - ea
-        logDebug {"VPD Source: Calculated from Humidity. es=${es.round(3)}, ea=${ea.round(3)}, ed=${ed.round(3)} kPa"}
+        logDebug {"VPD Source: Calculated from Humidity. es=${es.toDouble().round(3)}, ea=${ea.toDouble().round(3)}, ed=${ed.toDouble().round(3)} kPa"}
     } else {
         logWarn {"calculateET: Missing both native VPD and Humidity fallback. ET calculation aborted."}
         return
     }
 
-    // 4. Thermodynamic Constants
     def elevation = state.elevationMeters ? state.elevationMeters.toDouble() : 0.0
     def atmosPressure = 101.3 * Math.pow(((293.0 - (0.0065 * elevation)) / 293.0), 5.26)
     def gamma = 0.000665 * atmosPressure
     def delta = (4098.0 * (0.6108 * Math.exp((17.27 * tempC) / (tempC + 237.3)))) / Math.pow((tempC + 273.3), 2)
-    logDebug {"Thermodynamics - Elev: ${elevation}m, P: ${atmosPressure.round(2)}kPa, Gamma: ${gamma.round(4)}, Delta: ${delta.round(4)}"}
+    logDebug {"Thermodynamics - Elev: ${elevation}m, P: ${atmosPressure.toDouble().round(2)}kPa, Gamma: ${gamma.toDouble().round(4)}, Delta: ${delta.toDouble().round(4)}"}
 
-    // 5. Net Radiation (Rn) Estimation
-    // Using standard grass albedo (0.23) for Net Shortwave: Rns = 0.77 * Rs
-    // Applying a static 1.5 MJ/m2/d subtraction to account for Net Longwave loss back to space
     def rn = (0.77 * solarMJ.toDouble()) - 1.5
     if (rn < 0) rn = 0.0
-    logDebug {"Net Radiation (Rn) estimated as ${rn.round(3)} MJ/m2/day"}
+    logDebug {"Net Radiation (Rn) estimated as ${rn.toDouble().round(3)} MJ/m2/day"}
 
-    // 6. ASCE Penman-Monteith Equation
     def numerator = (0.408 * delta * rn) + (gamma * (900.0 / (tempC + 273.0)) * windMs * ed)
     def denominator = delta + (gamma * (1.0 + 0.34 * windMs))
     def etOs_mm = numerator / denominator
 
     if (etOs_mm < 0) etOs_mm = 0.0
-    logDebug {"Calculated Reference ETos: ${etOs_mm.round(2)} mm/day"}
+    logDebug {"Calculated Reference ETos: ${etOs_mm.toDouble().round(2)} mm/day"}
 
-    // 7. Zone-Level Deficit Ledger (Passive Monitoring)
     def etOs_in = etOs_mm / 25.4
     def effectiveRain = (rainIn ?: 0.0).toDouble() * 0.80
     
@@ -1411,29 +1482,26 @@ def calculateET() {
     
     logDebug {"--- Zone Ledger Updates ---"}
     state.valves.each { valveId, valveData ->
-        if (valveData.etMode) { // Only process zones explicitly opted into Smart ET
+        if (valveData.etMode) { 
             def hardwareSwitch = settings.valves?.find{it.id == valveId}
             def valveName = hardwareSwitch?.label ?: hardwareSwitch?.name ?: "Unknown Zone"
             
             def fallbackKc = settings.globalCropCoefficient != null ? settings.globalCropCoefficient.toDouble() : 0.8
             def zoneKc = valveData.kc?.toString()?.isNumber() ? valveData.kc.toDouble() : fallbackKc
             
-// Calculate specific loss for this zone's vegetation profile
             def zoneLoss = (etOs_in * zoneKc) - effectiveRain
             
-            // Store the daily breakdown for the UI Matrix
             valveData.lastET = (etOs_in * zoneKc)
             valveData.lastRain = effectiveRain
             valveData.todayApplied = 0.0 
             
             def currentDeficit = state.zoneDeficits[valveId] ?: 0.0            
-			def newDeficit = currentDeficit + zoneLoss
+            def newDeficit = currentDeficit + zoneLoss
             
-            // Field Capacity Cap: The soil bucket is full. Rain cannot create an infinite negative deficit.
             if (newDeficit < -0.1) newDeficit = -0.1 
             
             state.zoneDeficits[valveId] = newDeficit
-            logDebug {"${valveName} ($zoneKc Kc): Lost ${zoneLoss.round(3)}\". Ledger updated to ${newDeficit.round(3)}\" deficit."}
+            logDebug {"${valveName} ($zoneKc Kc): Lost ${zoneLoss.toDouble().round(3)}\". Ledger updated to ${newDeficit.toDouble().round(3)}\" deficit."}
         }
     }
     
@@ -1441,7 +1509,7 @@ def calculateET() {
     logDebug {"--- Completed Daily ET Calculation ---"}
 }
 
-
+// Retrieves Hub location to initiate a REST HTTP call for regional agricultural/soil data
 def getSoilTypeFromUSDA() {
     state.geo = state.geo ?: [:]
     if(state.geo.lat == null || state.geo.lon == null) {
@@ -1471,6 +1539,7 @@ def getSoilTypeFromUSDA() {
     logInfo {"Soil: ${state.usdaSoilMsg}"}
 }
 
+// Constructs a WKT polygon box around coordinates to parse XML outputs from the external NRCS database
 def getSoilData(geoLat, geoLon) {
     def geoDelta = 0.0001
     def polygonWkt = "POLYGON((${geoLon-geoDelta} ${geoLat-geoDelta},${geoLon+geoDelta} ${geoLat-geoDelta},${geoLon+geoDelta} ${geoLat+geoDelta},${geoLon-geoDelta} ${geoLat+geoDelta},${geoLon-geoDelta} ${geoLat-geoDelta}))"
@@ -1504,6 +1573,7 @@ def getSoilData(geoLat, geoLon) {
     } catch(exception) { logWarn {"getSoilData() SDA error: ${exception.message}"}; return null }
 }
 
+// Translates obscure SDA string profiles (e.g. "loamy fine sand") into strict agronomic class objects
 def mapSoilTextureToClass(String soilTexture) {
     if(!soilTexture) return "Loam"
     def formattedTexture = soilTexture.toLowerCase().trim()
@@ -1521,6 +1591,7 @@ def mapSoilTextureToClass(String soilTexture) {
 // UI Utilities
 // -----------------------------------------------------------------------------
 
+// Formats the primary HTML label block for the Hubitat App List page to reflect the current hardware operation state
 void updateMyLabel(lifecycleEvent) {
     String baseLabel = app.label?.with { contains('<span ') ? substring(0, indexOf('<span ')) : it } ?: ""
     String statusHtml = ""
@@ -1537,6 +1608,7 @@ void updateMyLabel(lifecycleEvent) {
     if (app.label != consolidatedLabel) { app.updateLabel(consolidatedLabel) }
 }
 
+// Converts standard Groovy epoch timestamps into simple conversational English (e.g. 'tomorrow at 9:00am')
 String fixDateTimeString(eventTimestamp) {
     def targetDate = new Date(eventTimestamp)
     def dateToday = new Date().clearTime()
@@ -1557,6 +1629,7 @@ String fixDateTimeString(eventTimestamp) {
     return timeString ? "${dateString} at ${timeString}" : dateString
 }
 
+// System logging wrappers configured to respect explicit UI toggle preferences
 void logDebug(Closure logMessage) {
     if (settings.debugEnable) { log.debug "${logMessage()}" }
 }
@@ -1569,11 +1642,13 @@ def logInfo(Closure logMessage) {
     if (settings.infoEnable) { log.info "${logMessage()}" }
 }
 
+// Pruning routine to prevent permanent debug overflow inside the Hubitat standard logs
 def logsOff() {
     logWarn {"debug logging Disabled..."}
     app?.updateSetting("debugEnable",[value:"false",type:"bool"])
 }
 
+// Forces users out of the wizard loop and explicitly checks if Hubitat has written the configuration sequence
 def installCheck() {         
     state.appInstalled = app.getInstallationState() 
     if(state.appInstalled != 'COMPLETE'){
@@ -1585,16 +1660,19 @@ def installCheck() {
     }
 }
 
+// Formats native Hubitat UI buttons to function dynamically through HTML overlays rather than full page loads
 String buttonLink(String buttonName, String linkText, hexColor = "#1A77C9", fontSize = "15px") {
     "<div class='form-group'><input type='hidden' name='${buttonName}.type' value='button'></div><div><div class='submitOnChange' onclick='buttonClick(this)' style='color:$hexColor;cursor:pointer;font-size:$fontSize'>$linkText</div></div><input type='hidden' name='settings[$buttonName]' value=''>"
 }
 
+// Styling wrapper for generating primary UI block breaks
 def sectFormat(formatType, textString=""){ 
     if(formatType == "line") return "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
     if(formatType == "title") return "<h2 style='color:#1A77C9;font-weight: bold'>${textString}</h2>"
     if(formatType == "subTitle") return "<p style='color:#1A77C9;font-weight: bold; font-size: 1.4em;'>${textString}</p>"
 }
 
+// Renders the static title block on top of every distinct application sub-page
 def displayHeader() {
     section (sectFormat("title", "SprinklerSchedulePlus")) {
         paragraph "<div style='color:#1A77C9;text-align:right;font-weight:small;font-size:9px;'>Current Version: ${version()} - &copy; 2023 C Steele</div>"
@@ -1602,4 +1680,5 @@ def displayHeader() {
     }
 }
 
+// Outputs standard HTML formatting strings used for styling section headers globally
 String menuHeader(headerText){"<div style=\"width:102%;background-color:#696969;color:white;padding:4px;font-weight: bold;box-shadow: 1px 2px 2px #bababa;margin-left: -10px\">${headerText}</div>"}
