@@ -19,7 +19,8 @@ This code is licensed as follows:
     Copyright (c) 2020, Matt Hammond
     All rights reserved.
 -----------------------------------------------------------------------------
- * Version 2.1.0: added evapiortranspiration calculation module.  --in work.
+ * Version 2.1.1: added passive mode for testing. Montitors all valves and performs calculations, but does not operate any valve.
+ * Version 2.1.0: added evapiortranspiration calculation module.
  * Version 2.0.3: bug fixes
  * Version 2.0.2: Pagination for the main page, removed support for valves
  * Version 2.0.1: Monolithic architecture consolidation. Semantic variable standardization.
@@ -76,7 +77,10 @@ def mainPage() {
             state.paused = schEnable ? false : true
             
             input "etEnable", "bool", title: "<b>Enable Smart Evapotranspiration (ET)?</b>", required: false, defaultValue: false, submitOnChange: true
-            input "passiveMode", "bool", title: "<b>Enable Passive/Test Mode?</b><br><i>(Calculates schedules and monitors external valve usage, but does NOT actuate relays)</i>", required: false, defaultValue: false, submitOnChange: true
+            
+            if (settings.etEnable) {
+                input "passiveMode", "bool", title: "<b>Enable Passive/Test Mode?</b><br><i>(Calculates dynamic ET durations & theoretical water ledgers, but strictly BYPASSES physical hardware relays)</i>", required: false, defaultValue: false, submitOnChange: true
+            }
 
             paragraph "\n<b>Switch Select</b>"
             input "valves",
@@ -103,7 +107,7 @@ def mainPage() {
                 String statusHtml = "<div style='background-color: rgba(73, 163, 125, 0.3);'>"  
                 
                 if (settings.passiveMode) {
-                    statusHtml += "<div style='background-color:#db7321; color:white; padding:5px; margin-bottom:10px;'><b>⚠️ SYSTEM IS IN PASSIVE MODE.</b> The scheduler will run a simulation, but physical valves will NOT be turned on.</div>"
+                    statusHtml += "<div style='background-color:#db7321; color:white; padding:6px; margin-bottom:10px; border: 2px solid black;'><b>⚠️ SYSTEM IS IN PASSIVE MODE.</b> The scheduler will run full ET simulations, but physical valves will <b>NOT</b> be turned on. External applications are tracked.</div>"
                 }
                 
                 if (settings.etEnable) {
@@ -114,6 +118,7 @@ def mainPage() {
                     "<b>Rain Hold:</b> ${state.rainHold ? '<span style=\"color:red;\">Active</span>' : 'Clear'}<br>" +
                     "<b>Soil Type:</b> ${state.defaultSoilType ?: 'Unknown'}<br>"
                     
+                    // Live Sensor Health Check
                     def currentTime = now()
                     def staleSensors = []
                     if (state.tempLastTime && ((currentTime - state.tempLastTime) / 1000.0) > 10800) staleSensors << "Temp"
@@ -128,10 +133,10 @@ def mainPage() {
                         statusHtml += "<b>Sensor Health:</b> <span style='color:green;'>All Nominal</span><br>"
                     }
                     
-                    statusHtml += "<br><b style='font-size:14px;'>Zone Agronomy Ledger</b>"
+                    statusHtml += "<br><b style='font-size:14px;'>Zone Agronomy Ledger (Actual vs Theoretical)</b>"
                     String zoneTableHtml = "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:6px; text-align:center; font-size:12px; border: 1px solid black; } .tstat-col th { background-color: #e0e0e0; font-weight: bold; }</style>"
                     zoneTableHtml += "<div style='overflow-x:auto; margin-top: 8px;'><table class='mdl-data-table tstat-col' style='width:100%; border-collapse: collapse; border:2px solid black'>"
-                    zoneTableHtml += "<thead><tr><th>Zone</th><th>Mode</th><th>Kc</th><th>App Rate</th><th>Yesterday ET</th><th>Yesterday Rain</th><th>Today Applied</th><th>Net Deficit</th></tr></thead><tbody>"
+                    zoneTableHtml += "<thead><tr><th>Zone</th><th>Mode</th><th>Kc</th><th>Rate</th><th>Net Loss</th><th>Act App</th><th>Theo App</th><th>Act Deficit</th><th>Theo Deficit</th></tr></thead><tbody>"
 
                     // Sort physical valves alphabetically, then build the table rows
                     valves?.sort { (it.label ?: it.name).toLowerCase() }?.each { hardwareSwitch ->
@@ -145,15 +150,20 @@ def mainPage() {
                             def kc = valveData.kc ?: (settings.globalCropCoefficient ?: 0.8)
                             def appRate = valveData.appRate ?: "Unset"
 
-                            def lastEt = valveData.lastET != null ? "${valveData.lastET.toDouble().round(3)}\"" : "--"
-                            def lastRain = valveData.lastRain != null ? "${valveData.lastRain.toDouble().round(3)}\"" : "--"
-                            def applied = valveData.todayApplied != null ? "${valveData.todayApplied.toDouble().round(3)}\"" : "0.000\""
+                            def netLoss = (valveData.lastET != null && valveData.lastRain != null) ? "${(valveData.lastET.toDouble() - valveData.lastRain.toDouble()).round(3)}\"" : "--"
 
-                            def deficit = state.zoneDeficits ? (state.zoneDeficits[valveId] ?: 0.0) : 0.0
-                            def deficitColor = deficit > 0.0 ? "red" : (deficit < 0.0 ? "blue" : "green")
-                            def deficitStr = "<span style='color:${deficitColor}; font-weight:bold;'>${deficit.toDouble().round(3)}\"</span>"
+                            def actApplied = valveData.todayApplied != null ? "${valveData.todayApplied.toDouble().round(3)}\"" : "0.000\""
+                            def theoApplied = valveData.theoApplied != null ? "${valveData.theoApplied.toDouble().round(3)}\"" : "0.000\""
 
-                            zoneTableHtml += "<tr><td>${valveName}</td><td>${isEt}</td><td>${kc}</td><td>${appRate}</td><td>${lastEt}</td><td>${lastRain}</td><td>${applied}</td><td>${deficitStr}</td></tr>"
+                            def actDeficit = state.zoneDeficits ? (state.zoneDeficits[valveId] ?: 0.0) : 0.0
+                            def actColor = actDeficit > 0.0 ? "red" : (actDeficit < 0.0 ? "blue" : "green")
+                            def actDefStr = "<span style='color:${actColor}; font-weight:bold;'>${actDeficit.toDouble().round(3)}\"</span>"
+
+                            def theoDeficit = state.theoDeficits ? (state.theoDeficits[valveId] ?: 0.0) : 0.0
+                            def theoColor = theoDeficit > 0.0 ? "red" : (theoDeficit < 0.0 ? "blue" : "green")
+                            def theoDefStr = "<span style='color:${theoColor}; font-weight:bold;'>${theoDeficit.toDouble().round(3)}\"</span>"
+
+                            zoneTableHtml += "<tr><td>${valveName}</td><td>${isEt}</td><td>${kc}</td><td>${appRate}</td><td>${netLoss}</td><td>${actApplied}</td><td>${theoApplied}</td><td>${actDefStr}</td><td>${theoDefStr}</td></tr>"
                         }
                     }
                     zoneTableHtml += "</tbody></table></div><br>"
@@ -811,6 +821,8 @@ def updated() {
     // --- Valve Application Monitoring ---
     // Subscribes to the valves to monitor physical on/off duration, enabling passive deficit tracking
     if (state.zoneDeficits == null) state.zoneDeficits = [:]
+    if (state.theoDeficits == null) state.theoDeficits = [:]
+    
     unsubscribe("valveSwitchHandler")
     valves?.each { hardwareValve -> 
         subscribe(hardwareValve, "switch", "valveSwitchHandler") 
@@ -1013,7 +1025,38 @@ def scheduleNext() {
     }
 }
 
-// Triggers the initial watering sequence for a specific Day Group and activates the first physical valve
+// Analyzes the specific valve's math ledger and translates inches of deficit into execution seconds
+def getZoneDuration(valveId, activeGroupId) {
+    def valveData = state.valves[valveId]
+    
+    // ET Smart Mode Dynamic Calculation
+    if (valveData?.etMode) {
+        def appRate = valveData.appRate?.toString()?.isNumber() ? valveData.appRate.toDouble() : 0.0
+        if (appRate > 0) {
+            // Passive Mode schedules off the ghost ledger; Active Mode schedules off ground truth
+            def targetDeficit = settings.passiveMode ? (state.theoDeficits[valveId] ?: 0.0) : (state.zoneDeficits[valveId] ?: 0.0)
+            
+            if (targetDeficit > 0.0) {
+                def requiredHours = targetDeficit / appRate
+                return Math.round(requiredHours * 3600).toInteger()
+            } else {
+                return 0 // Soil is at capacity. Skip execution.
+            }
+        } else {
+            logWarn {"Zone ${valveId} is mapped to Smart ET but lacks an Application Rate. Skipping execution."}
+            return 0
+        }
+    } 
+    
+    // Static Fallback Mode
+    def baseDurationMinutes = state.dayGroup."$activeGroupId".duraTime ?: 0
+    def currentMonthInteger = new Date().format("M")    
+    def seasonalMultiplier = state.month2month ? state.month2month[currentMonthInteger].toDouble() / 100 : 1  
+    def calculatedDurationSeconds = 60 * baseDurationMinutes * seasonalMultiplier
+    return Math.max(calculatedDurationSeconds.toInteger(), 20) // Hardware protection min 20s
+}
+
+// Begins the schedule group by acquiring the pending switches and passing them to the loop processor
 def schedHandler(payloadData) {
     unschedule(schedHandler)
     String appLabel = app.label
@@ -1021,18 +1064,11 @@ def schedHandler(payloadData) {
     
     logInfo {"Running $appLabel Schedule."}
     String activeGroupId = payloadData["targetGroupId"] as String
-    def baseDurationMinutes = state.dayGroup."$activeGroupId".duraTime
 
     if(state.dayGroup[activeGroupId].ot && !state.overTempToday) {
         logInfo {"No Over Temperature today, skipping."}
         runIn(60, scheduleNext)
         return
-    }
-
-    if (baseDurationMinutes == 0) {
-        logInfo {"Duration of 0, skipping."}
-        runIn(60, scheduleNext)
-        return  
     }
 
     if (state.rainHold) { 
@@ -1041,87 +1077,25 @@ def schedHandler(payloadData) {
         return
     }
 
-    def pendingSwitches = state.valves.findAll { it.value.dayGroup.contains(activeGroupId) }.keySet()
-    if (!pendingSwitches) {
-        logInfo {"No Switch in Day Group."}
+    List pendingSwitchesList = state.valves.findAll { it.value.dayGroup.contains(activeGroupId) }.keySet().toList()
+    if (!pendingSwitchesList || pendingSwitchesList.isEmpty()) {
+        logInfo {"No Switch assigned in Day Group."}
         runIn(60, scheduleNext)
         return
     }
-    logDebug {"schedHandler: target $activeGroupId, queue: $pendingSwitches"} 
 
-    String activeSwitchId = pendingSwitches[0] as String
-    if (activeSwitchId != null) { pendingSwitches = pendingSwitches.tail() }
-
-    def hardwareSwitch = settings.valves?.find{it.id == "$activeSwitchId"}
-    
-    if (settings.passiveMode) {
-        logInfo {"PASSIVE MODE: Bypassing ON command for ${hardwareSwitch?.label ?: hardwareSwitch?.name}."}
-    } else {
-        hardwareSwitch?.on()
-        logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} on."}
-    }
-    
     state.inCycle = true
     atomicState.cycleStart = now()
     updateMyLabel(3)
 
-    baseDurationMinutes = state.dayGroup."$activeGroupId".duraTime
-    def currentMonthInteger = new Date().format("M")    
-    def seasonalMultiplier = state.month2month ? state.month2month[currentMonthInteger].toDouble() / 100 : 1  
-    def calculatedDurationSeconds = 60 * baseDurationMinutes * seasonalMultiplier
-    def safeDurationSeconds = Math.max(calculatedDurationSeconds.toInteger(), 20) 
-    
-    logDebug {"runIn($safeDurationSeconds, scheduleDurationHandler, [activeSwitchId: $activeSwitchId, pendingSwitches: $pendingSwitches, targetGroupId: $activeGroupId])"}
-    runIn(safeDurationSeconds, scheduleDurationHandler, [data: [activeSwitchId: "$activeSwitchId", durationSeconds: "$safeDurationSeconds", pendingSwitches: "$pendingSwitches", targetGroupId: "$activeGroupId"]]) 
+    // Hand off to the unified list processor
+    processNextValveQueue(pendingSwitchesList, activeGroupId)
 }
 
-// Executes when a valve completes its runtime: shuts the active valve off and recurses to the next switch in the group.
-// Once a group completes, it checks for dependent/cascaded groups.
-def scheduleDurationHandler(payloadData) {
-    unschedule(scheduleDurationHandler)
-    String activeSwitchId = payloadData.activeSwitchId as String
-    String activeGroupId = payloadData.targetGroupId as String
-    def safeDurationSeconds = payloadData.durationSeconds.toInteger()
-    def pendingSwitches = payloadData.pendingSwitches as String
-    logDebug {"schedDurHandler: stopping switch $activeSwitchId, next queue: $pendingSwitches"}
-
-    def hardwareSwitch = settings.valves?.find{it.id == "$activeSwitchId"}
-    
-    if (settings.passiveMode) {
-        logInfo {"PASSIVE MODE: Bypassing OFF command for ${hardwareSwitch?.label ?: hardwareSwitch?.name}."}
-    } else {
-        hardwareSwitch?.off()
-        logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} off."}
-    }
-
-    pauseExecution(20000)
-    
-    if (state.rainHold) {
-        logWarn {"Rain Hold triggered mid-cycle. Aborting remaining zones."}
-        state.inCycle = false
-        atomicState.cycleEnd = now()
-        runIn(30, scheduleNext)
-        updateMyLabel(4)
-        return
-    }
-
-    if (pendingSwitches != '[]') {
-        pendingSwitches = pendingSwitches.replaceAll(/\[|\]/, '').split(',').collect { it.trim().toInteger() }
-        String nextSwitchId = pendingSwitches[0] as String
-        if (nextSwitchId != null) {
-            pendingSwitches = pendingSwitches.tail()
-            hardwareSwitch = settings.valves?.find{it.id == "$nextSwitchId"}
-            
-            if (settings.passiveMode) {
-                logInfo {"PASSIVE MODE: Bypassing ON command for ${hardwareSwitch?.label ?: hardwareSwitch?.name}."}
-            } else {
-                hardwareSwitch?.on()
-                logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} on."}
-            }
-            
-            runIn(safeDurationSeconds, scheduleDurationHandler, [data: [activeSwitchId: "$nextSwitchId", durationSeconds: "$safeDurationSeconds", pendingSwitches: "$pendingSwitches", targetGroupId: "$activeGroupId"]])
-        }
-    } else {
+// Recursively processes the queue. It instantly skips any zones returning '0 seconds' and only actuates zones requiring water
+def processNextValveQueue(List pendingSwitchesList, String activeGroupId) {
+    if (!pendingSwitchesList || pendingSwitchesList.isEmpty()) {
+        // Group list exhausted. Check for cascaded/chained Day Groups.
         Calendar calendar = Calendar.getInstance();
         def currentDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK);
         Map cronWeekTranslation = [1:'7', 2:'1', 3:'2', 4:'3', 5:'4', 6:'5', 7:'6']
@@ -1140,7 +1114,87 @@ def scheduleDurationHandler(payloadData) {
             runIn(30, scheduleNext)
             updateMyLabel(4)
         }
+        return
     }
+
+    // Iterate through the list until we find a valve that actually needs water
+    String activeSwitchId = null
+    def safeDurationSeconds = 0
+    def hardwareSwitch = null
+
+    while (pendingSwitchesList.size() > 0 && safeDurationSeconds == 0) {
+        activeSwitchId = pendingSwitchesList.remove(0) as String
+        safeDurationSeconds = getZoneDuration(activeSwitchId, activeGroupId)
+        
+        if (safeDurationSeconds == 0) {
+            logInfo {"Zone ${activeSwitchId} requires 0 seconds (Soil at capacity). Bypassing."}
+        } else {
+            hardwareSwitch = settings.valves?.find{it.id == activeSwitchId}
+        }
+    }
+
+    if (safeDurationSeconds > 0 && hardwareSwitch) {
+        if (settings.passiveMode) {
+            logInfo {"PASSIVE MODE: Bypassing ON command for ${hardwareSwitch.label ?: hardwareSwitch.name}. Simulating ${safeDurationSeconds}s run."}
+        } else {
+            hardwareSwitch.on()
+            logInfo {"Valve switch ${hardwareSwitch.label ?: hardwareSwitch.name} on for ${safeDurationSeconds}s."}
+        }
+        
+        // Pass the remaining truncated list forward to the shutdown handler
+        runIn(safeDurationSeconds, scheduleDurationHandler, [data: [activeSwitchId: activeSwitchId, durationSeconds: safeDurationSeconds, pendingSwitches: pendingSwitchesList, targetGroupId: activeGroupId]]) 
+    } else {
+        // List was completely exhausted and no valves required water. Close the cycle.
+        processNextValveQueue([], activeGroupId) 
+    }
+}
+
+// Executes when a valve runtime completes: shuts the active valve off, updates theoretical ledgers, and recurses
+def scheduleDurationHandler(payloadData) {
+    unschedule(scheduleDurationHandler)
+    String activeSwitchId = payloadData.activeSwitchId as String
+    String activeGroupId = payloadData.targetGroupId as String
+    def safeDurationSeconds = payloadData.durationSeconds.toInteger()
+    List pendingSwitchesList = payloadData.pendingSwitches as List
+    
+    def hardwareSwitch = settings.valves?.find{it.id == activeSwitchId}
+    
+    if (settings.passiveMode) {
+        logInfo {"PASSIVE MODE: Bypassing OFF command for ${hardwareSwitch?.label ?: hardwareSwitch?.name}."}
+    } else {
+        hardwareSwitch?.off()
+        logInfo {"Valve switch ${hardwareSwitch?.label ?: hardwareSwitch?.name} off."}
+    }
+
+    // Only update the Ghost Ledger when the system runs its own simulated schedule
+    def valveData = state.valves[activeSwitchId]
+    if (valveData?.etMode && valveData?.appRate?.toString()?.isNumber()) {
+        def appRate = valveData.appRate.toDouble()
+        def inchesApplied = (safeDurationSeconds / 3600.0) * appRate
+        
+        if (state.theoDeficits == null) state.theoDeficits = [:]
+        def currentTheo = state.theoDeficits[activeSwitchId] ?: 0.0
+        def newTheo = currentTheo - inchesApplied
+        if (newTheo < -0.1) newTheo = -0.1 
+        
+        state.theoDeficits[activeSwitchId] = newTheo
+        valveData.theoApplied = (valveData.theoApplied ?: 0.0) + inchesApplied
+        logDebug {"Ghost Ledger updated for ${hardwareSwitch?.label ?: hardwareSwitch?.name}: Sim Applied ${inchesApplied.toDouble().round(3)}\". New Theo Deficit: ${newTheo.toDouble().round(3)}\""}
+    }
+
+    pauseExecution(20000)
+    
+    if (state.rainHold) {
+        logWarn {"Rain Hold triggered mid-cycle. Aborting remaining zones."}
+        state.inCycle = false
+        atomicState.cycleEnd = now()
+        runIn(30, scheduleNext)
+        updateMyLabel(4)
+        return
+    }
+
+    // Hand back to the processor to find the next valid valve in the queue
+    processNextValveQueue(pendingSwitchesList, activeGroupId)
 }
 
 // Queries the UI state and generates a sorted array of chronological execution events for the current day
@@ -1160,6 +1214,7 @@ def valveSwitchHandler(hardwareEvent) {
     def valveId = hardwareEvent.deviceId.toString()
     def valveData = state.valves[valveId]
     
+    // Ignore valves that aren't configured for ET tracking
     if (!valveData || valveData.etMode == false) return 
 
     if (hardwareEvent.value == "on") {
@@ -1176,9 +1231,11 @@ def valveSwitchHandler(hardwareEvent) {
             if (appRate > 0.0) {
                 def inchesApplied = durationHours * appRate
                 
+                // Subtract the applied water from the zone's actual deficit
                 def currentDeficit = state.zoneDeficits[valveId] ?: 0.0
                 def newDeficit = currentDeficit - inchesApplied
                 
+                // Field Capacity Cap: Prevent the ledger from infinitely tracking surplus overwatering
                 if (newDeficit < -0.1) newDeficit = -0.1 
                 
                 state.zoneDeficits[valveId] = newDeficit
@@ -1215,6 +1272,7 @@ def etTempHandler(hardwareEvent) {
     state.tempLastValue = val
 }
 
+// Incremental accumulator for Vapor Pressure Deficit (VPD)
 def etVpdHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def val = new BigDecimal(hardwareEvent.value)
@@ -1232,6 +1290,7 @@ def etVpdHandler(hardwareEvent) {
     state.vpdLastValue = val
 }
 
+// Incremental accumulator for Relative Humidity
 def etHumidHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def val = new BigDecimal(hardwareEvent.value)
@@ -1249,6 +1308,7 @@ def etHumidHandler(hardwareEvent) {
     state.humidLastValue = val
 }
 
+// Incremental accumulator for Wind Speed
 def etWindHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def val = new BigDecimal(hardwareEvent.value)
@@ -1256,7 +1316,7 @@ def etWindHandler(hardwareEvent) {
 
     if (state.windLastTime) {
         def deltaSeconds = (currentTime - state.windLastTime) / 1000.0
-        if (deltaSeconds > 14400) logWarn {"Stale Sensor Warning: Wind Sensor was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."}
+        if (deltaSeconds > 14400) logWarn {"Stale Sensor Warning: Wind Sensor was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."} // Slightly longer tolerance for wind calms
         
         def lastVal = state.windLastValue ?: val
         state.windSum = (state.windSum ?: 0.0) + (lastVal * deltaSeconds)
@@ -1266,6 +1326,7 @@ def etWindHandler(hardwareEvent) {
     state.windLastValue = val
 }
 
+// Definite Integral accumulator specifically converting native Wattage into absolute daily Megajoules (MJ)
 def etSolarHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def valWatts = new BigDecimal(hardwareEvent.value)
@@ -1425,6 +1486,7 @@ def closeOutDailyAccumulators() {
 def calculateET() {
     logDebug {"--- Starting Daily ET Calculation ---"}
     
+    // 1. Close out the accumulators and extract the 24-hour true means
     def dailyData = closeOutDailyAccumulators()
     logDebug {"Accumulator Data Closed: ${dailyData}"}
 
@@ -1435,20 +1497,24 @@ def calculateET() {
     def humidPct = dailyData.humid
     def rainIn = dailyData.rain
 
+    // Hard stop if primary telemetry is missing
     if (tempF == null || windMph == null || solarMJ == null) {
         logWarn {"calculateET: Missing core telemetry (Temp, Wind, or Solar). ET calculation aborted for today."}
         return
     }
 
+    // 2. Unit Conversions to strictly Metric
     def tempC = (tempF.toDouble() - 32.0) * (5.0 / 9.0)
     def windMs = windMph.toDouble() * 0.44704
     logDebug {"Converted Baseline - Temp: ${tempC.toDouble().round(2)}°C, Wind: ${windMs.toDouble().round(2)} m/s"}
 
+    // 3. Vapor Pressure Deficit (ed) Routing
     def ed = 0.0
     if (vpdKpa != null) {
         ed = vpdKpa.toDouble()
         logDebug {"VPD Source: Native Hardware Vapor Pressure Deficit (${ed.toDouble().round(3)} kPa)"}
     } else if (humidPct != null) {
+        // Fallback: Calculate es and ea from temperature and relative humidity
         def es = 0.6108 * Math.exp((17.27 * tempC) / (tempC + 237.3))
         def ea = es * (humidPct.toDouble() / 100.0)
         ed = es - ea
@@ -1458,16 +1524,21 @@ def calculateET() {
         return
     }
 
+    // 4. Thermodynamic Constants
     def elevation = state.elevationMeters ? state.elevationMeters.toDouble() : 0.0
     def atmosPressure = 101.3 * Math.pow(((293.0 - (0.0065 * elevation)) / 293.0), 5.26)
     def gamma = 0.000665 * atmosPressure
     def delta = (4098.0 * (0.6108 * Math.exp((17.27 * tempC) / (tempC + 237.3)))) / Math.pow((tempC + 273.3), 2)
     logDebug {"Thermodynamics - Elev: ${elevation}m, P: ${atmosPressure.toDouble().round(2)}kPa, Gamma: ${gamma.toDouble().round(4)}, Delta: ${delta.toDouble().round(4)}"}
 
+    // 5. Net Radiation (Rn) Estimation
+    // Using standard grass albedo (0.23) for Net Shortwave: Rns = 0.77 * Rs
+    // Applying a static 1.5 MJ/m2/d subtraction to account for Net Longwave loss back to space
     def rn = (0.77 * solarMJ.toDouble()) - 1.5
     if (rn < 0) rn = 0.0
     logDebug {"Net Radiation (Rn) estimated as ${rn.toDouble().round(3)} MJ/m2/day"}
 
+    // 6. ASCE Penman-Monteith Equation
     def numerator = (0.408 * delta * rn) + (gamma * (900.0 / (tempC + 273.0)) * windMs * ed)
     def denominator = delta + (gamma * (1.0 + 0.34 * windMs))
     def etOs_mm = numerator / denominator
@@ -1475,10 +1546,12 @@ def calculateET() {
     if (etOs_mm < 0) etOs_mm = 0.0
     logDebug {"Calculated Reference ETos: ${etOs_mm.toDouble().round(2)} mm/day"}
 
+    // 7. Zone-Level Deficit Ledger (Dual Active/Passive Tracking)
     def etOs_in = etOs_mm / 25.4
     def effectiveRain = (rainIn ?: 0.0).toDouble() * 0.80
     
     if (state.zoneDeficits == null) state.zoneDeficits = [:]
+    if (state.theoDeficits == null) state.theoDeficits = [:]
     
     logDebug {"--- Zone Ledger Updates ---"}
     state.valves.each { valveId, valveData ->
@@ -1488,26 +1561,34 @@ def calculateET() {
             
             def fallbackKc = settings.globalCropCoefficient != null ? settings.globalCropCoefficient.toDouble() : 0.8
             def zoneKc = valveData.kc?.toString()?.isNumber() ? valveData.kc.toDouble() : fallbackKc
-            
             def zoneLoss = (etOs_in * zoneKc) - effectiveRain
             
+            // 7a. Record Component Variables for UI
             valveData.lastET = (etOs_in * zoneKc)
             valveData.lastRain = effectiveRain
             valveData.todayApplied = 0.0 
+            valveData.theoApplied = 0.0 
             
+            // 7b. Actual Ground-Truth Ledger
             def currentDeficit = state.zoneDeficits[valveId] ?: 0.0            
             def newDeficit = currentDeficit + zoneLoss
-            
-            if (newDeficit < -0.1) newDeficit = -0.1 
-            
+            if (newDeficit < -0.1) newDeficit = -0.1 // Cap field capacity
             state.zoneDeficits[valveId] = newDeficit
-            logDebug {"${valveName} ($zoneKc Kc): Lost ${zoneLoss.toDouble().round(3)}\". Ledger updated to ${newDeficit.toDouble().round(3)}\" deficit."}
+            
+            // 7c. Theoretical 'Ghost' Ledger
+            def currentTheoDeficit = state.theoDeficits[valveId] ?: 0.0            
+            def newTheoDeficit = currentTheoDeficit + zoneLoss
+            if (newTheoDeficit < -0.1) newTheoDeficit = -0.1 
+            state.theoDeficits[valveId] = newTheoDeficit
+            
+            logDebug {"${valveName} ($zoneKc Kc): Lost ${zoneLoss.toDouble().round(3)}\". Act Deficit: ${newDeficit.toDouble().round(3)}\" | Theo Deficit: ${newTheoDeficit.toDouble().round(3)}\""}
         }
     }
     
     state.lastEtRunTime = now()
     logDebug {"--- Completed Daily ET Calculation ---"}
 }
+
 
 // Retrieves Hub location to initiate a REST HTTP call for regional agricultural/soil data
 def getSoilTypeFromUSDA() {
