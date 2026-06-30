@@ -19,6 +19,8 @@ This code is licensed as follows:
     Copyright (c) 2020, Matt Hammond
     All rights reserved.
 -----------------------------------------------------------------------------
+ * Version 2.1.3: Disabled outdoorTempDevice and defers to etTempDevice if enabled
+ * Version 2.1.2: Switched to .lastActivity for sensor data staleness detection rather than a data constancy trigger
  * Version 2.1.1: added passive mode for testing. Montitors all valves and performs calculations, but does not operate any valve.
  * Version 2.1.0: added evapiortranspiration calculation module.
  * Version 2.0.3: bug fixes
@@ -113,30 +115,40 @@ def mainPage() {
                 if (settings.etEnable) {
                     def lastRunDisplay = state.lastEtRunTime ? fixDateTimeString(state.lastEtRunTime) : "Pending Midnight"
                     
+                    def sysSoil = state.defaultSoilType ?: "Loam"
+                    def sysAwc = getAvailableWaterCapacity(sysSoil)
+                    def sysRz = settings.rootDepth ?: 6.0
+                    def sysMad = (settings.mad ?: 50.0) / 100.0
+                    def sysMaxSwc = sysAwc * sysRz
+                    def sysMinSwc = sysMaxSwc - (sysMaxSwc * sysMad)
+
                     statusHtml += "<b>💧 Smart ET Scheduling</b> is <b>ACTIVE</b><br>" +
                     "<b>Last ET Calculation:</b> ${lastRunDisplay}<br>" +
                     "<b>Rain Hold:</b> ${state.rainHold ? '<span style=\"color:red;\">Active</span>' : 'Clear'}<br>" +
-                    "<b>Soil Type:</b> ${state.defaultSoilType ?: 'Unknown'}<br>"
+                    "<b>Soil Type:</b> ${state.defaultSoilType ?: 'Unknown'}<br>" +
+                    "<b>Global SWC Bounds:</b> Total Available Water (maximum the soil can hold): <span style='color:blue'>${sysMaxSwc.toDouble().round(3)}\"</span> | Min Allowable (MAD): <span style='color:red'>${sysMinSwc.toDouble().round(3)}\"</span><br>"
                     
-                    // Live Sensor Health Check
-                    def currentTime = now()
+                    // Live Sensor Health Check (Hardware Heartbeat)
+                    def currentDateTime = new Date()
                     def staleSensors = []
-                    if (state.tempLastTime && ((currentTime - state.tempLastTime) / 1000.0) > 10800) staleSensors << "Temp"
-                    if (state.vpdLastTime && ((currentTime - state.vpdLastTime) / 1000.0) > 10800) staleSensors << "VPD"
-                    if (state.humidLastTime && ((currentTime - state.humidLastTime) / 1000.0) > 10800) staleSensors << "Humid"
-                    if (state.windLastTime && ((currentTime - state.windLastTime) / 1000.0) > 14400) staleSensors << "Wind"
-                    if (state.solarLastTime && ((currentTime - state.solarLastTime) / 1000.0) > 10800) staleSensors << "Solar"
+                    def thermalTimeout = settings.enableSleepyTimers ? 12.0 : 3.0
+                    
+                    if (settings.etTempDevice?.lastActivity && ((currentDateTime.time - settings.etTempDevice.lastActivity.time) / 3600000.0) > thermalTimeout) staleSensors << "Temp"
+                    if (settings.etVpdDevice?.lastActivity && ((currentDateTime.time - settings.etVpdDevice.lastActivity.time) / 3600000.0) > thermalTimeout) staleSensors << "VPD"
+                    if (settings.etHumidDevice?.lastActivity && ((currentDateTime.time - settings.etHumidDevice.lastActivity.time) / 3600000.0) > thermalTimeout) staleSensors << "Humid"
+                    if (settings.etWindDevice?.lastActivity && ((currentDateTime.time - settings.etWindDevice.lastActivity.time) / 3600000.0) > 4.0) staleSensors << "Wind"
+                    if (settings.etSolarDevice?.lastActivity && ((currentDateTime.time - settings.etSolarDevice.lastActivity.time) / 3600000.0) > 14.0) staleSensors << "Solar"
                     
                     if (staleSensors) {
-                        statusHtml += "<b>⚠️ Sensor Warning:</b> Stale Data (${staleSensors.join(', ')})<br>"
+                        statusHtml += "<b>⚠️ Sensor Warning:</b> Hardware Offline (${staleSensors.join(', ')})<br>"
                     } else {
-                        statusHtml += "<b>Sensor Health:</b> <span style='color:green;'>All Nominal</span><br>"
+                        statusHtml += "<b>Sensor Health:</b> <span style='color:green;'>All Hardware Online</span><br>"
                     }
                     
                     statusHtml += "<br><b style='font-size:14px;'>Zone Agronomy Ledger (Actual vs Theoretical)</b>"
                     String zoneTableHtml = "<style>.mdl-data-table tbody tr:hover{background-color:inherit} .tstat-col td,.tstat-col th { padding:6px; text-align:center; font-size:12px; border: 1px solid black; } .tstat-col th { background-color: #e0e0e0; font-weight: bold; }</style>"
                     zoneTableHtml += "<div style='overflow-x:auto; margin-top: 8px;'><table class='mdl-data-table tstat-col' style='width:100%; border-collapse: collapse; border:2px solid black'>"
-                    zoneTableHtml += "<thead><tr><th>Zone</th><th>Mode</th><th>Kc</th><th>Rate</th><th>Net Loss</th><th>Act App</th><th>Theo App</th><th>Act Deficit</th><th>Theo Deficit</th></tr></thead><tbody>"
+                    zoneTableHtml += "<thead><tr><th>Zone</th><th>Mode</th><th>Kc</th><th>Rate</th><th>Net Loss</th><th>Act App</th><th>Theo App</th><th>Act Deficit</th><th>Theo Deficit</th><th>Act SWC</th><th>Theo SWC</th></tr></thead><tbody>"
 
                     // Sort physical valves alphabetically, then build the table rows
                     valves?.sort { (it.label ?: it.name).toLowerCase() }?.each { hardwareSwitch ->
@@ -163,7 +175,17 @@ def mainPage() {
                             def theoColor = theoDeficit > 0.0 ? "red" : (theoDeficit < 0.0 ? "blue" : "green")
                             def theoDefStr = "<span style='color:${theoColor}; font-weight:bold;'>${theoDeficit.toDouble().round(3)}\"</span>"
 
-                            zoneTableHtml += "<tr><td>${valveName}</td><td>${isEt}</td><td>${kc}</td><td>${appRate}</td><td>${netLoss}</td><td>${actApplied}</td><td>${theoApplied}</td><td>${actDefStr}</td><td>${theoDefStr}</td></tr>"
+                            def soilType = state.defaultSoilType ?: "Loam"
+                            def awc = getAvailableWaterCapacity(soilType)
+                            def taw = awc * (settings.rootDepth ?: 6.0)
+
+                            def actSwc = taw - actDeficit
+                            def theoSwc = taw - theoDeficit
+                            
+                            def actSwcStr = "<span style='font-weight:bold;'>${actSwc.toDouble().round(3)}\"</span>"
+                            def theoSwcStr = "<span style='font-weight:bold;'>${theoSwc.toDouble().round(3)}\"</span>"
+
+                            zoneTableHtml += "<tr><td>${valveName}</td><td>${isEt}</td><td>${kc}</td><td>${appRate}</td><td>${netLoss}</td><td>${actApplied}</td><td>${theoApplied}</td><td>${actDefStr}</td><td>${theoDefStr}</td><td>${actSwcStr}</td><td>${theoSwcStr}</td></tr>"
                         }
                     }
                     zoneTableHtml += "</tbody></table></div><br>"
@@ -175,8 +197,10 @@ def mainPage() {
                     "<b>Soil</b> is $state.defaultSoilType<br>"
                 }
                 
-                if (settings.outdoorTempDevice) {
-                    def currentTemp = settings.outdoorTempDevice.currentValue("temperature") ?: "N/A"
+                def activeStatusTempDevice = settings.etEnable ? settings.etTempDevice : settings.outdoorTempDevice
+                if (activeStatusTempDevice) {
+                    def statusAttr = settings.etEnable ? (settings.attrTemperature ?: "temperature") : "temperature"
+                    def currentTemp = activeStatusTempDevice.currentValue(statusAttr) ?: "N/A"
                     def todayHigh = state.todayHighTemp ?: currentTemp
                     def triggerLimit = settings.maxOutdoorTemp ?: "N/A"
                     statusHtml += "<b>Temperature:</b> Current: ${currentTemp}° | Today's High: ${todayHigh}° | Trigger Limit: ${triggerLimit}°<br>"
@@ -234,7 +258,11 @@ def environmentPage() {
         section(menuHeader("Global Overrides & Environment")) {
             paragraph displayMonths() 
             editMonths()
-            selectTemperatureDevice()
+            if (!settings.etEnable) {
+                selectTemperatureDevice()
+            } else {
+                paragraph "<b>Overtemperature Status:</b> Controlled automatically by the primary <b>Air Temperature Sensor</b> mapped on the ET Config page."
+            }
             selectRainDevice()
             
             paragraph "\n<b>Agronomy Site Data (Information Only)</b>"
@@ -251,11 +279,13 @@ def environmentPage() {
 
 // Renders the ET Telemetry mapping page, allowing users to align Hubitat hardware attributes with mathematical inputs
 def etConfigPage() {
-    dynamicPage(name: "etConfigPage", title: "Evapotranspiration (ET) Telemetry", uninstall: false, install: false) {
+ 
+	dynamicPage(name: "etConfigPage", title: "Evapotranspiration (ET) Telemetry", uninstall: false, install: false) {
         displayHeader()
         
         section(menuHeader("Agronomy Baseline")) {
-            String helpHtml = "<p><b>Global Crop Coefficient (Kc)</b><br>" +
+            
+			String helpHtml = "<p><b>Global Crop Coefficient (Kc)</b><br>" +
                 "<i>Defines the transpiration profile of your primary vegetation. This multiplier scales the atmospheric evaporation rate to match your yard's specific biological needs. For example, Kentucky Bluegrass (KBG) maintained at a taller 3-inch height has more leaf surface area and transpires more water (higher Kc) than KBG cut to 1.5 inches.</i></p>" +
                 
                 "<div style='padding-bottom: 12px;'><table style='border-collapse: collapse; width: 100%; font-size: 13px; border: 1px solid #ccc; background-color: #f9f9f9;'>" +
@@ -271,6 +301,9 @@ def etConfigPage() {
 
             paragraph helpHtml
             input "globalCropCoefficient", "decimal", title: "Set Crop Coefficient (Kc):", defaultValue: 0.8, range: "0.1..1.5", required: true, width: 6
+			
+			input "rootDepth", "decimal", title: "Root Zone Depth (inches):", defaultValue: 6.0, range: "1.0..24.0", required: true, width: 4
+            input "mad", "decimal", title: "Management Allowable Depletion (MAD) %:", defaultValue: 50.0, range: "10..90", required: true, width: 4
         }
 
         section(menuHeader("Atmospheric Sensors")) {
@@ -285,7 +318,7 @@ def etConfigPage() {
             paragraph sensorHelp
             
             // Temperature (Always Required)
-            input "etTempDevice", "capability.temperatureMeasurement", title: "Air Temperature Sensor", multiple: false, required: false, submitOnChange: true, width: 6
+            input "etTempDevice", "capability.temperatureMeasurement", title: "Air Temperature Sensor", multiple: false, required: true, submitOnChange: true, width: 6
             if (settings.etTempDevice) {
                 def tempAttrs = settings.etTempDevice.supportedAttributes.collect { it?.toString() }.toSet().sort()
                 input "attrTemperature", "enum", title: "Temperature Attribute", options: tempAttrs, defaultValue: "temperature", required: false, width: 6
@@ -306,21 +339,21 @@ def etConfigPage() {
             }
 
             // Solar Radiation
-            input "etSolarDevice", "capability.illuminanceMeasurement", title: "Solar Radiation Sensor", multiple: false, required: false, submitOnChange: true, width: 6
+            input "etSolarDevice", "capability.illuminanceMeasurement", title: "Solar Radiation Sensor", multiple: false, required: true, submitOnChange: true, width: 6
             if (settings.etSolarDevice) {
                 def solarAttrs = settings.etSolarDevice.supportedAttributes.collect { it?.toString() }.toSet().sort()
                 input "attrSolar", "enum", title: "Solar Attribute (e.g., illuminance/solarradiation)", options: solarAttrs, defaultValue: "illuminance", required: false, width: 6
             }
 
             // Wind Speed
-            input "etWindDevice", "capability.sensor", title: "Wind Speed Sensor", multiple: false, required: false, submitOnChange: true, width: 6
+            input "etWindDevice", "capability.sensor", title: "Wind Speed Sensor", multiple: false, required: true, submitOnChange: true, width: 6
             if (settings.etWindDevice) {
                 def windAttrs = settings.etWindDevice.supportedAttributes.collect { it?.toString() }.toSet().sort()
                 input "attrWind", "enum", title: "Wind Speed Attribute", options: windAttrs, required: false, width: 6
             }
             
             // Rainfall
-            input "etRainGauge", "capability.sensor", title: "Rain Gauge", multiple: false, required: false, submitOnChange: true, width: 6
+            input "etRainGauge", "capability.sensor", title: "Rain Gauge", multiple: false, required: true, submitOnChange: true, width: 6
             if (settings.etRainGauge) {
                 def rainAttrs = settings.etRainGauge.supportedAttributes.collect { it?.toString() }.toSet().sort()
                 input "attrRainAccumulation", "enum", title: "Daily Rain Attribute (e.g., dailyrainin)", options: rainAttrs, required: false, width: 6
@@ -332,6 +365,23 @@ def etConfigPage() {
                 def soilAttrs = settings.etSoilProbe.supportedAttributes.collect { it?.toString() }.toSet().sort()
                 input "attrSoilTemp", "enum", title: "Soil Temperature Attribute", options: soilAttrs, defaultValue: "temperature", required: false, width: 6
             }
+        }
+        
+        section(menuHeader("Advanced Telemetry Processing")) {
+            String timeoutHelp = "<details style='margin-bottom: 15px; cursor: pointer;'><summary><b><span style='color: #db7321;'>⚙️ Advanced: Sensor Protocol & Sleepy Device Timers</span></b></summary>" +
+                "<div style='padding: 10px 0px; font-size: 13px;'>" +
+                "<p>The ET engine must distinguish between a sensor that is perfectly stable (e.g., Temperature is exactly 68° for 4 hours) and a sensor that has physically dropped off the network. If a sensor drops offline, the ET engine will execute a hard stop to prevent bad math from corrupting your water deficit ledger.</p>" +
+                "<b>Default Protocol (Heartbeat/Mains Powered)</b><br>" +
+                "Assumes dedicated weather stations (like Ecowitt) that check in constantly." +
+                "<ul><li><b>Temp/Humid/VPD:</b> 3 Hour Timeout</li><li><b>Wind:</b> 4 Hour Timeout</li><li><b>Solar:</b> 14 Hour Timeout (Accounts for long nights)</li></ul>" +
+                "<b>Sleepy Device Protocol (Zigbee/Z-Wave Battery)</b><br>" +
+                "Assumes sensors only wake up to transmit when the temperature physically changes. Applies a 4x multiplier to thermal timeouts to prevent false failures during stable weather." +
+                "<ul><li><b>Temp/Humid/VPD:</b> 12 Hour Timeout</li><li><b>Wind:</b> 4 Hour Timeout (Remains strict; wind is highly volatile)</li><li><b>Solar:</b> 14 Hour Timeout</li></ul>" +
+                "<p><i>Note: Hardware Rain Gauges and external Sprinkler Valve states are completely exempt from these timeouts. They are 100% asynchronous, event-driven integrations.</i></p>" +
+                "</div></details>"
+                
+            paragraph timeoutHelp
+            input "enableSleepyTimers", "bool", title: "<b>Enable Sleepy Device Tolerance (4x Multiplier)</b>", required: false, defaultValue: false, submitOnChange: true
         }
     }
 }
@@ -769,10 +819,13 @@ def updated() {
     unsubscribe()
     
     // Overtemperature routing setup
-    if (outdoorTempDevice) { 
-        subscribe(outdoorTempDevice, "temperature", "recvOutdoorTempHandler") 
+    def activeTempDevice = settings.etEnable ? settings.etTempDevice : settings.outdoorTempDevice
+    
+    if (activeTempDevice) { 
+        def tempAttribute = settings.etEnable ? (settings.attrTemperature ?: "temperature") : "temperature"
+        subscribe(activeTempDevice, tempAttribute, "recvOutdoorTempHandler") 
         
-        def currentAmbientTemp = outdoorTempDevice.currentValue("temperature")?.toString()
+        def currentAmbientTemp = activeTempDevice.currentValue(tempAttribute)?.toString()
         def configuredMaxTemp = settings.maxOutdoorTemp?.toString()
         
         if (currentAmbientTemp?.isNumber() && !configuredMaxTemp?.isNumber()) {
@@ -830,22 +883,29 @@ def updated() {
     
     // --- ET Telemetry Subscriptions & Initialization ---
     // Establishes the real-time listening hooks for the running accumulators
+    // --- ET Telemetry Subscriptions & Initialization ---
+    // Establishes the real-time listening hooks for the running accumulators
     if (settings.etEnable) {
         def bootTime = now()
         if (state.solarMJ == null) state.solarMJ = 0.0
         if (state.solarLastTime == null) state.solarLastTime = bootTime
+        if (state.solarLastValue == null && settings.etSolarDevice) state.solarLastValue = settings.etSolarDevice.currentValue(settings.attrSolar?.toString()) ?: 0.0
         
         if (state.windSum == null) state.windSum = 0.0
         if (state.windLastTime == null) state.windLastTime = bootTime
+        if (state.windLastValue == null && settings.etWindDevice) state.windLastValue = settings.etWindDevice.currentValue(settings.attrWind?.toString()) ?: 0.0
         
         if (state.tempSum == null) state.tempSum = 0.0
         if (state.tempLastTime == null) state.tempLastTime = bootTime
+        if (state.tempLastValue == null && settings.etTempDevice) state.tempLastValue = settings.etTempDevice.currentValue(settings.attrTemperature?.toString()) ?: 0.0
         
         if (state.vpdSum == null) state.vpdSum = 0.0
         if (state.vpdLastTime == null) state.vpdLastTime = bootTime
+        if (state.vpdLastValue == null && settings.etVpdDevice) state.vpdLastValue = settings.etVpdDevice.currentValue(settings.attrVpd?.toString()) ?: 0.0
         
         if (state.humidSum == null) state.humidSum = 0.0
         if (state.humidLastTime == null) state.humidLastTime = bootTime
+        if (state.humidLastValue == null && settings.etHumidDevice) state.humidLastValue = settings.etHumidDevice.currentValue(settings.attrHumidity?.toString()) ?: 0.0
         
         if (state.dailyRain == null) state.dailyRain = 0.0
 
@@ -1000,7 +1060,7 @@ def scheduleNext() {
     }
 
     if (!schEnable) { logWarn {"Schedule Paused for $appLabel."}; return }
-    if (state.rainHold) { logWarn {"Rain Hold possible for $appLabel Today."} }
+    if (state.rainHold) { logWarn {"Active Rain Hold detected during schedule evaluation for $appLabel."} }
     
     Date currentDate = new Date()
     String formattedTimeNow = currentDate.format("HH:mm")
@@ -1018,7 +1078,8 @@ def scheduleNext() {
 
     if (hasValidSchedule) { 
         schedule("0 ${startMinute} ${startHour} ? * *", schedHandler, [data: ["targetGroupId":"$targetGroupId"]]) 
-        logInfo {"$appLabel scheduled today."}
+        String scheduleQualifier = state.rainHold ? "queued pending rain sensor clearance" : "scheduled normally"
+        logInfo {"$appLabel event context: ${scheduleQualifier} for today."}
         logDebug {"Scheduled events list for today: ${futureTimings}"}
     } else {
         logInfo {"Nothing scheduled for $appLabel today."}
@@ -1236,7 +1297,12 @@ def valveSwitchHandler(hardwareEvent) {
                 def newDeficit = currentDeficit - inchesApplied
                 
                 // Field Capacity Cap: Prevent the ledger from infinitely tracking surplus overwatering
+                def soilType = state.defaultSoilType ?: "Loam"
+                def awc = getAvailableWaterCapacity(soilType)
+                def maxDeficit = (awc * (settings.rootDepth ?: 6.0)) * ((settings.mad ?: 50.0) / 100.0)
+
                 if (newDeficit < -0.1) newDeficit = -0.1 
+                if (newDeficit > maxDeficit) newDeficit = maxDeficit
                 
                 state.zoneDeficits[valveId] = newDeficit
                 valveData.todayApplied = (valveData.todayApplied ?: 0.0) + inchesApplied
@@ -1251,10 +1317,7 @@ def valveSwitchHandler(hardwareEvent) {
 }
 
 // --- ET Telemetry Accumulators (Time-Weighted) ---
-// The following 5 methods handle asynchronous telemetry events from hardware sensors.
-// They use an incremental Riemann Sum to perfectly average (or integrate) high-frequency data without array bloat.
 
-// Incremental accumulator for Temperature
 def etTempHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def val = new BigDecimal(hardwareEvent.value)
@@ -1262,8 +1325,6 @@ def etTempHandler(hardwareEvent) {
 
     if (state.tempLastTime) {
         def deltaSeconds = (currentTime - state.tempLastTime) / 1000.0
-        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: Air Temperature was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."}
-        
         def lastVal = state.tempLastValue ?: val
         state.tempSum = (state.tempSum ?: 0.0) + (lastVal * deltaSeconds)
     }
@@ -1272,7 +1333,6 @@ def etTempHandler(hardwareEvent) {
     state.tempLastValue = val
 }
 
-// Incremental accumulator for Vapor Pressure Deficit (VPD)
 def etVpdHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def val = new BigDecimal(hardwareEvent.value)
@@ -1280,8 +1340,6 @@ def etVpdHandler(hardwareEvent) {
 
     if (state.vpdLastTime) {
         def deltaSeconds = (currentTime - state.vpdLastTime) / 1000.0
-        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: VPD Sensor was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."}
-        
         def lastVal = state.vpdLastValue ?: val
         state.vpdSum = (state.vpdSum ?: 0.0) + (lastVal * deltaSeconds)
     }
@@ -1290,7 +1348,6 @@ def etVpdHandler(hardwareEvent) {
     state.vpdLastValue = val
 }
 
-// Incremental accumulator for Relative Humidity
 def etHumidHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def val = new BigDecimal(hardwareEvent.value)
@@ -1298,8 +1355,6 @@ def etHumidHandler(hardwareEvent) {
 
     if (state.humidLastTime) {
         def deltaSeconds = (currentTime - state.humidLastTime) / 1000.0
-        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: Humidity Sensor was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."}
-        
         def lastVal = state.humidLastValue ?: val
         state.humidSum = (state.humidSum ?: 0.0) + (lastVal * deltaSeconds)
     }
@@ -1308,7 +1363,6 @@ def etHumidHandler(hardwareEvent) {
     state.humidLastValue = val
 }
 
-// Incremental accumulator for Wind Speed
 def etWindHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def val = new BigDecimal(hardwareEvent.value)
@@ -1316,8 +1370,6 @@ def etWindHandler(hardwareEvent) {
 
     if (state.windLastTime) {
         def deltaSeconds = (currentTime - state.windLastTime) / 1000.0
-        if (deltaSeconds > 14400) logWarn {"Stale Sensor Warning: Wind Sensor was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."} // Slightly longer tolerance for wind calms
-        
         def lastVal = state.windLastValue ?: val
         state.windSum = (state.windSum ?: 0.0) + (lastVal * deltaSeconds)
     }
@@ -1326,7 +1378,6 @@ def etWindHandler(hardwareEvent) {
     state.windLastValue = val
 }
 
-// Definite Integral accumulator specifically converting native Wattage into absolute daily Megajoules (MJ)
 def etSolarHandler(hardwareEvent) {
     if (!hardwareEvent.value?.isNumber()) return
     def valWatts = new BigDecimal(hardwareEvent.value)
@@ -1334,8 +1385,6 @@ def etSolarHandler(hardwareEvent) {
 
     if (state.solarLastTime) {
         def deltaSeconds = (currentTime - state.solarLastTime) / 1000.0
-        if (deltaSeconds > 10800) logWarn {"Stale Sensor Warning: Solar Radiation was offline/inactive for ${(deltaSeconds/60).toInteger()} minutes."}
-        
         def lastValWatts = state.solarLastValue ?: valWatts
         def sliceMJ = (lastValWatts * deltaSeconds) / 1000000.0
         state.solarMJ = (state.solarMJ ?: 0.0) + sliceMJ
@@ -1486,6 +1535,40 @@ def closeOutDailyAccumulators() {
 def calculateET() {
     logDebug {"--- Starting Daily ET Calculation ---"}
     
+	// 0. Perform Definitive Hardware Health Audit
+    def currentTime = new Date()
+    def staleDevices = []
+    
+    // Determine strict vs sleepy timeouts
+    def thermalTimeout = settings.enableSleepyTimers ? 12.0 : 3.0
+    
+    // Evaluate Hubitat's native lastActivity property (returns a java.util.Date)
+    if (settings.etTempDevice && settings.etTempDevice.lastActivity) {
+        def hoursSinceActivity = (currentTime.time - settings.etTempDevice.lastActivity.time) / 3600000.0
+        if (hoursSinceActivity > thermalTimeout) staleDevices << "Temperature Sensor (${hoursSinceActivity.round(1)} hrs)"
+    }
+    if (settings.etHumidDevice && settings.etHumidDevice.lastActivity) {
+        def hoursSinceActivity = (currentTime.time - settings.etHumidDevice.lastActivity.time) / 3600000.0
+        if (hoursSinceActivity > thermalTimeout) staleDevices << "Humidity Sensor (${hoursSinceActivity.round(1)} hrs)"
+    }
+    if (settings.etVpdDevice && settings.etVpdDevice.lastActivity) {
+        def hoursSinceActivity = (currentTime.time - settings.etVpdDevice.lastActivity.time) / 3600000.0
+        if (hoursSinceActivity > thermalTimeout) staleDevices << "VPD Sensor (${hoursSinceActivity.round(1)} hrs)"
+    }
+    if (settings.etWindDevice && settings.etWindDevice.lastActivity) {
+        def hoursSinceActivity = (currentTime.time - settings.etWindDevice.lastActivity.time) / 3600000.0
+        if (hoursSinceActivity > 4.0) staleDevices << "Wind Sensor (${hoursSinceActivity.round(1)} hrs)"
+    }
+    if (settings.etSolarDevice && settings.etSolarDevice.lastActivity) {
+        def hoursSinceActivity = (currentTime.time - settings.etSolarDevice.lastActivity.time) / 3600000.0
+        if (hoursSinceActivity > 14.0) staleDevices << "Solar Sensor (${hoursSinceActivity.round(1)} hrs)"
+    }
+
+    if (!staleDevices.isEmpty()) {
+        logWarn {"calculateET: HARDWARE FAULT DETECTED. The following devices have dropped off the network: ${staleDevices.join(', ')}. ET calculation aborted for today."}
+        return
+    }
+
     // 1. Close out the accumulators and extract the 24-hour true means
     def dailyData = closeOutDailyAccumulators()
     logDebug {"Accumulator Data Closed: ${dailyData}"}
@@ -1569,16 +1652,31 @@ def calculateET() {
             valveData.todayApplied = 0.0 
             valveData.theoApplied = 0.0 
             
+            def soilType = state.defaultSoilType ?: "Loam"
+            def awc = getAvailableWaterCapacity(soilType)
+            def rz = settings.rootDepth ?: 6.0
+            def madPct = (settings.mad ?: 50.0) / 100.0
+
+            def taw = awc * rz
+            def maxDeficit = taw * madPct
+            def fieldCapacity = -0.1 // Baseline surface pooling buffer
+
             // 7b. Actual Ground-Truth Ledger
             def currentDeficit = state.zoneDeficits[valveId] ?: 0.0            
             def newDeficit = currentDeficit + zoneLoss
-            if (newDeficit < -0.1) newDeficit = -0.1 // Cap field capacity
+
+            if (newDeficit < fieldCapacity) newDeficit = fieldCapacity 
+            if (newDeficit > maxDeficit) newDeficit = maxDeficit 
+
             state.zoneDeficits[valveId] = newDeficit
             
             // 7c. Theoretical 'Ghost' Ledger
             def currentTheoDeficit = state.theoDeficits[valveId] ?: 0.0            
             def newTheoDeficit = currentTheoDeficit + zoneLoss
-            if (newTheoDeficit < -0.1) newTheoDeficit = -0.1 
+
+            if (newTheoDeficit < fieldCapacity) newTheoDeficit = fieldCapacity 
+            if (newTheoDeficit > maxDeficit) newTheoDeficit = maxDeficit 
+
             state.theoDeficits[valveId] = newTheoDeficit
             
             logDebug {"${valveName} ($zoneKc Kc): Lost ${zoneLoss.toDouble().round(3)}\". Act Deficit: ${newDeficit.toDouble().round(3)}\" | Theo Deficit: ${newTheoDeficit.toDouble().round(3)}\""}
@@ -1668,6 +1766,17 @@ def mapSoilTextureToClass(String soilTexture) {
     }
 }
 
+// Translates mapped USDA soil textures into Available Water Capacity (inches of water per inch of soil)
+def getAvailableWaterCapacity(String soilClass) {
+    switch(soilClass) {
+        case "Sand": return 0.05
+        case "Loamy Sand": return 0.08
+        case "Loam": return 0.17
+        case "Clay Loam": return 0.20
+        case "Clay": return 0.15
+        default: return 0.17 
+    }
+}
 // -----------------------------------------------------------------------------
 // UI Utilities
 // -----------------------------------------------------------------------------
