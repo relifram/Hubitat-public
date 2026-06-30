@@ -19,6 +19,7 @@ This code is licensed as follows:
     Copyright (c) 2020, Matt Hammond
     All rights reserved.
 -----------------------------------------------------------------------------
+ * Version 2.1.4: added per dayGroup rainhold option
  * Version 2.1.3: Disabled outdoorTempDevice and defers to etTempDevice if enabled
  * Version 2.1.2: Switched to .lastActivity for sensor data staleness detection rather than a data constancy trigger
  * Version 2.1.1: added passive mode for testing. Montitors all valves and performs calculations, but does not operate any valve.
@@ -477,6 +478,7 @@ String displayDayGroups() {
         "<th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th><th>Sun</th>" +
         "<th style='color:red;'>Delete</th>" +
         "<th style='color:#db7321;'>OverTemp</th>" +
+        "<th style='color:#1A77C9;'>RainBypass</th>" +
         "<th>Start Time</th><th>$durationHeader</th><th>Reset</th>" +
         "</tr></thead><tr style='color:black'border = 1>" 
 
@@ -501,6 +503,10 @@ String displayDayGroups() {
         String buttonTempOff = buttonLink("o$groupId", iconUnchecked, "#db7321", "")
         String buttonTempOn = buttonLink("o$groupId", iconChecked, "#db7321", "")
         tableHtml += (groupData."ot") ? "<th>$buttonTempOn</th>" : "<th>$buttonTempOff</th>" 
+        
+        String buttonRhBypassOff = buttonLink("b$groupId", iconUnchecked, "#1A77C9", "")
+        String buttonRhBypassOn = buttonLink("b$groupId", iconChecked, "#1A77C9", "")
+        tableHtml += (groupData."rhBypass") ? "<th>$buttonRhBypassOn</th>" : "<th>$buttonRhBypassOff</th>"
         
         String rawStartTime = state.dayGroup[groupId]?.startTime
         String startTimeDisplay = rawStartTime ? (rawStartTime.startsWith("after_") ? "After Grp ${rawStartTime.split('_')[1]}" : rawStartTime) : "Set Time"
@@ -675,8 +681,7 @@ def selectDayGroup() {
 
 // Appends a new, blank Day Group row to the Schedule Matrix
 def addDayGroup(eventTrigger = null) {
-    def templateMap = [ '1': false, '2': false, '3': false, '4': false, '5': false, '6': false, '7': false, "s": "P", "name": "", "ot": false, "ra": false, "duraTime": null, "startTime": null ]
-    
+	def templateMap = [ '1': false, '2': false, '3': false, '4': false, '5': false, '6': false, '7': false, "s": "P", "name": "", "ot": false, "ra": false, "duraTime": null, "startTime": null, "rhBypass": false ]    
     // Clone map to force Hubitat database serialization
     def clonedGroups = [:]
     state.dayGroup.each { k, v -> clonedGroups[k] = v }
@@ -954,7 +959,7 @@ def init(reasonCode) {
             if(state.defaultSoilType == null) state.defaultSoilType = "Unknown"
             
             if(state.month2month == null) state.month2month = ["1":"100", "2":"100", "3":"100", "4":"100", "5":"100", "6":"100", "7":"100", "8":"100", "9":"100", "10":"100", "11":"100", "12":"100"]
-            if(state.dayGroup == null) state.dayGroup = ['1': ['1':true, '2':true, '3':true, '4':true, '5':true, '6':true, '7':true, "s": "P", "name": "", "ot": false, "ra": false, "duraTime": null, "startTime": null ] ] 
+            if(state.dayGroup == null) state.dayGroup = ['1': ['1':true, '2':true, '3':true, '4':true, '5':true, '6':true, '7':true, "s": "P", "name": "", "ot": false, "ra": false, "duraTime": null, "startTime": null, "rhBypass": false ] ] 
             
             valves?.each { hardwareDevice -> if(!state.valves["$hardwareDevice.id"]) { state.valves["$hardwareDevice.id"] = ['dayGroup':['1'], 'etMode':true] } } 
             break; 
@@ -1004,9 +1009,12 @@ void appButtonHandler(btnTrigger) {
         clonedValves[targetValveId].etMode = !currentState
         state.valves = clonedValves
         return
+    } else if ( btnTrigger.startsWith("b")        ) {
+        def targetGroupId = btnTrigger.minus("b")
+        if (state.dayGroup.containsKey(targetGroupId)) { state.dayGroup[targetGroupId].rhBypass = !state.dayGroup[targetGroupId].rhBypass }
     }
-
-   if      ( btnTrigger == "btnSchEna")           toggleEnaSchBtn()
+	
+	if      ( btnTrigger == "btnSchEna")           toggleEnaSchBtn()
     else if ( btnTrigger == "btnUsda")             getSoilTypeFromUSDA()
     else if ( btnTrigger == "btnElevation")        fetchElevationData()
     else if ( btnTrigger == "addDGBtn")            addDayGroup()
@@ -1132,10 +1140,13 @@ def schedHandler(payloadData) {
         return
     }
 
-    if (state.rainHold) { 
-        logWarn {"Rain Hold - schedule skipped for $appLabel Today."}
+    def isBypassed = state.dayGroup[activeGroupId]?.rhBypass ?: false
+    if (state.rainHold && !isBypassed) { 
+        logWarn {"Rain Hold Active - schedule skipped for Day Group ${activeGroupId} on $appLabel Today."}
         runIn(60, scheduleNext)
         return
+    } else if (state.rainHold && isBypassed) {
+        logInfo {"Rain Hold is Active, but Day Group ${activeGroupId} configuration specifies RainBypass. Proceeding with execution cycle."}
     }
 
     List pendingSwitchesList = state.valves.findAll { it.value.dayGroup.contains(activeGroupId) }.keySet().toList()
@@ -1245,8 +1256,9 @@ def scheduleDurationHandler(payloadData) {
 
     pauseExecution(20000)
     
-    if (state.rainHold) {
-        logWarn {"Rain Hold triggered mid-cycle. Aborting remaining zones."}
+    def isBypassed = state.dayGroup[activeGroupId]?.rhBypass ?: false
+    if (state.rainHold && !isBypassed) {
+        logWarn {"Rain Hold triggered mid-cycle. Aborting remaining zones for Day Group ${activeGroupId}."}
         state.inCycle = false
         atomicState.cycleEnd = now()
         runIn(30, scheduleNext)
